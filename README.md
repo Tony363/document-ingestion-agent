@@ -62,6 +62,8 @@ document-agent process invoice.pdf --output json
 
 ## Architecture
 
+### Legacy Architecture (v1.x)
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Document Input Layer                     │
@@ -89,6 +91,208 @@ document-agent process invoice.pdf --output json
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+## New Agentic Pipeline Architecture (v2.0)
+
+The Document Ingestion Agent v2.0 introduces an **agentic pipeline system** specifically designed for PDF and image document processing, leveraging **Mistral OCR API** for intelligent text extraction and dynamic JSON schema generation.
+
+### System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    FastAPI Application Layer                     │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │ File Upload API │  │  Status Tracking │  │ Schema Delivery │ │
+│  │ (50MB PDF/Image)│  │   (Real-time)   │  │  (JSON/Webhook) │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   Agentic Processing Pipeline                   │
+│                                                                 │
+│  ┌─────────────────┐                                           │
+│  │ Validation Agent │  ← PDF/Image format validation           │
+│  │ • File validation │                                        │
+│  │ • Size limits     │                                        │
+│  │ • Security scan   │                                        │
+│  └─────────┬───────┘                                           │
+│            │                                                   │
+│            ▼                                                   │
+│  ┌─────────────────┐                                           │
+│  │Classification   │  ← Document type & complexity detection   │
+│  │Agent            │                                           │
+│  │ • PDF vs Image  │                                           │
+│  │ • Document type │                                           │
+│  │ • Complexity    │                                           │
+│  └─────────┬───────┘                                           │
+│            │                                                   │
+│            ▼                                                   │
+│  ┌─────────────────┐                                           │
+│  │Text Layer       │  ← Smart cost optimization               │
+│  │Detection        │                                           │
+│  │ • Native PDF    │  (90% cost savings)                      │
+│  │ • Scanned PDF   │                                           │
+│  │ • Route to OCR  │                                           │
+│  └─────────┬───────┘                                           │
+│            │                                                   │
+│            ▼                                                   │
+│  ┌─────────────────┐                                           │
+│  │Mistral OCR Agent│  ← Exclusive OCR processing               │
+│  │ • mistral-ocr-  │                                           │
+│  │   latest model  │  • 94.9% accuracy                        │
+│  │ • 50MB/1000 pgs │  • $0.001 per page                       │
+│  │ • Multilingual  │  • 2000 pages/min                        │
+│  └─────────┬───────┘                                           │
+│            │                                                   │
+│            ▼                                                   │
+│  ┌─────────────────┐                                           │
+│  │Content Analysis │  ← Intelligent content understanding     │
+│  │Agent            │                                           │
+│  │ • Document type │                                           │
+│  │ • Confidence    │                                           │
+│  │ • Structure     │                                           │
+│  └─────────┬───────┘                                           │
+│            │                                                   │
+│            ▼                                                   │
+│  ┌─────────────────┐                                           │
+│  │Schema Generation│  ← Dynamic JSON schema creation          │
+│  │Agent            │                                           │
+│  │ • Invoice       │  • Receipt                                │
+│  │ • Contract      │  • Form                                   │
+│  │ • Custom types  │  • Validation                             │
+│  └─────────┬───────┘                                           │
+└────────────┼─────────────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Webhook Automation Layer                     │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │ Schema Storage  │  │ Trigger Engine  │  │ Webhook Delivery│ │
+│  │ • Versioned     │  │ • Rule-based    │  │ • HMAC signed   │ │
+│  │ • Validated     │  │ • Conditional   │  │ • Retry logic   │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Agentic Pipeline Features
+
+#### 🤖 **Intelligent Agent Coordination**
+- **Validation Agent**: File format validation, security scanning, size limits
+- **Classification Agent**: Document type detection using metadata and content analysis
+- **OCR Agent**: Exclusive Mistral OCR API integration with rate limiting
+- **Analysis Agent**: Content structure detection and confidence scoring
+- **Schema Agent**: Dynamic JSON schema generation with document-specific templates
+
+#### 📊 **Mistral OCR Integration**
+- **Model**: `mistral-ocr-latest` with 94.9% accuracy
+- **Performance**: Up to 2000 pages/minute processing speed
+- **Capacity**: 50MB max file size, 1000 pages per document
+- **Output**: Structured Markdown with preserved formatting, tables, equations
+- **Cost**: $0.001 per page with intelligent cost optimization
+
+#### 💡 **Smart Cost Optimization**
+- **Native PDF Text Detection**: Automatically detects text-layer PDFs to bypass OCR
+- **90% Cost Savings**: Most business PDFs contain native text and skip expensive OCR
+- **Intelligent Routing**: Only use OCR for scanned documents and images
+- **Rate Limiting**: Built-in quota management and backoff strategies
+
+#### 🔄 **Dynamic Schema Generation**
+
+**Invoice Documents:**
+```json
+{
+  "document_type": "invoice",
+  "extraction_confidence": 0.94,
+  "content": {
+    "vendor_info": {
+      "name": "Company ABC",
+      "address": "123 Main St",
+      "tax_id": "TAX123456"
+    },
+    "invoice_details": {
+      "invoice_number": "INV-2025-001",
+      "date": "2025-01-15",
+      "due_date": "2025-02-15"
+    },
+    "line_items": [
+      {"description": "Product A", "quantity": 1, "price": 100.00}
+    ],
+    "totals": {
+      "subtotal": 100.00,
+      "tax": 10.00,
+      "total": 110.00
+    }
+  },
+  "metadata": {
+    "pages": 1,
+    "processing_time": 2.3,
+    "language": "en",
+    "ocr_confidence": 0.94
+  },
+  "webhook_ready": true
+}
+```
+
+**Receipt Documents:**
+```json
+{
+  "document_type": "receipt",
+  "extraction_confidence": 0.91,
+  "content": {
+    "merchant_info": {
+      "name": "Store XYZ", 
+      "address": "456 Shop Ave",
+      "phone": "555-0123"
+    },
+    "transaction_details": {
+      "receipt_number": "RCP-789",
+      "date": "2025-01-15",
+      "time": "14:30:00"
+    },
+    "items": [
+      {"name": "Product A", "quantity": 2, "price": 25.00}
+    ],
+    "payment": {
+      "method": "card",
+      "total": 50.00,
+      "tax": 5.00
+    }
+  },
+  "webhook_ready": true
+}
+```
+
+#### 🚀 **FastAPI Endpoints**
+
+```python
+POST /documents/upload          # PDF/image upload with validation
+GET /documents/{id}/status      # Processing progress tracking
+GET /documents/{id}/content     # Extracted content and metadata
+GET /documents/{id}/schema      # Generated JSON schema
+POST /documents/batch          # Batch processing support
+GET /schemas/{doc_type}         # Schema templates by document type
+```
+
+#### 🛡️ **Production Features**
+- **Idempotent Processing**: All operations re-entrant with correlation IDs
+- **Error Handling**: Comprehensive retry logic with exponential backoff
+- **Security**: File validation, PII detection, webhook HMAC signatures
+- **Monitoring**: OpenTelemetry tracing, cost tracking, performance metrics
+- **Scalability**: Async processing with proper backpressure management
+
+### Processing State Machine
+
+```
+received → queued → text_extracted (native|ocr) → classified → extracted → validated → webhook_ready
+```
+
+### Implementation Timeline
+
+- **Week 1**: Core FastAPI infrastructure + Mistral OCR integration
+- **Week 2**: Agent system development + intelligent routing
+- **Week 3**: Schema generation + document type templates  
+- **Week 4**: Production hardening + comprehensive documentation
 
 ### Core Components
 

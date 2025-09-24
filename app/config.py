@@ -1,80 +1,107 @@
 """
-Configuration settings for Document Ingestion Agent v2.0
+Application Configuration
+
+Centralized configuration for the document processing pipeline.
+Uses environment variables with sensible defaults.
 """
 
-import os
-from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from typing import Optional
+import os
 
 class Settings(BaseSettings):
-    """Application configuration settings"""
+    """Application settings"""
     
-    # Application settings
-    app_name: str = "Document Ingestion Agent v2.0"
-    app_version: str = "2.0.0"
-    debug: bool = Field(default=False, env="DEBUG")
+    # Application
+    app_name: str = "Document Ingestion Agent"
+    app_version: str = "1.0.0"
+    debug: bool = False
+    environment: str = "development"  # development, staging, production
     
-    # Server settings
-    host: str = Field(default="0.0.0.0", env="HOST")
-    port: int = Field(default=8000, env="PORT")
-    workers: int = Field(default=4, env="WORKERS")
+    # API Configuration
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    api_prefix: str = "/api/v1"
+    cors_origins: list = ["*"]
     
-    # Mistral OCR API settings
-    mistral_api_key: Optional[str] = Field(default=None, env="MISTRAL_API_KEY")
-    mistral_ocr_model: str = Field(default="mistral-ocr-latest", env="MISTRAL_OCR_MODEL")
-    mistral_rate_limit: int = Field(default=60, env="MISTRAL_RATE_LIMIT")  # requests per minute
+    # Mistral OCR Configuration
+    mistral_api_key: str = os.getenv("MISTRAL_API_KEY", "")
+    mistral_api_url: str = "https://api.mistral.ai/v1/ocr"
+    mistral_rate_limit_delay: float = 0.1  # seconds between requests
     
-    # File processing settings
-    max_file_size: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
-    supported_file_types: str = Field(
-        default=".pdf,.png,.jpg,.jpeg,.tiff,.bmp", 
-        env="SUPPORTED_FILE_TYPES"
-    )
-    upload_directory: str = Field(default="/tmp/document-uploads", env="UPLOAD_DIRECTORY")
+    # File Upload Configuration
+    max_upload_size_mb: int = 10
+    allowed_extensions: list = [".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"]
+    upload_directory: str = "./uploads"
     
-    # Processing settings
-    max_concurrent_documents: int = Field(default=5, env="MAX_CONCURRENT_DOCUMENTS")
-    processing_timeout: int = Field(default=300, env="PROCESSING_TIMEOUT")  # seconds
+    # Redis Configuration
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: Optional[str] = None
+    cache_ttl_seconds: int = 3600  # 1 hour
     
-    # Database settings (optional for future use)
-    database_url: Optional[str] = Field(default=None, env="DATABASE_URL")
-    redis_url: Optional[str] = Field(default=None, env="REDIS_URL")
+    # PostgreSQL Configuration
+    database_url: str = "postgresql://user:password@localhost/document_agent"
+    database_pool_size: int = 10
+    database_max_overflow: int = 20
     
-    # Security settings
-    api_key_required: bool = Field(default=False, env="API_KEY_REQUIRED")
-    api_key: Optional[str] = Field(default=None, env="API_KEY")
-    allowed_origins: str = Field(default="*", env="ALLOWED_ORIGINS")
+    # Celery Configuration
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/2"
+    celery_task_time_limit: int = 300  # 5 minutes
+    celery_task_soft_time_limit: int = 270
     
-    # Webhook settings
-    webhook_timeout: int = Field(default=10, env="WEBHOOK_TIMEOUT")  # seconds
-    webhook_retry_attempts: int = Field(default=3, env="WEBHOOK_RETRY_ATTEMPTS")
-    webhook_secret: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
+    # Processing Configuration
+    ocr_confidence_threshold: float = 0.7
+    extraction_confidence_threshold: float = 0.6
+    validation_strict_mode: bool = True
+    max_pages_per_document: int = 10
     
-    # Monitoring settings
-    enable_metrics: bool = Field(default=True, env="ENABLE_METRICS")
-    enable_tracing: bool = Field(default=False, env="ENABLE_TRACING")
-    log_level: str = Field(default="INFO", env="LOG_LEVEL")
+    # Webhook Configuration
+    webhook_timeout_seconds: int = 30
+    webhook_max_retries: int = 3
+    webhook_retry_delay_seconds: int = 5
     
-    # Cost optimization settings
-    enable_native_pdf_detection: bool = Field(default=True, env="ENABLE_NATIVE_PDF_DETECTION")
-    ocr_confidence_threshold: float = Field(default=0.7, env="OCR_CONFIDENCE_THRESHOLD")
+    # Security Configuration
+    api_key_header: str = "X-API-Key"
+    enable_api_key_auth: bool = True
+    api_keys: list = []  # Load from environment or secrets manager
     
-    @property
-    def supported_file_types_list(self) -> list:
-        """Convert comma-separated file types to list"""
-        return self.supported_file_types.split(",")
+    # Monitoring Configuration
+    enable_metrics: bool = True
+    metrics_port: int = 9090
+    log_level: str = "INFO"
+    log_format: str = "json"  # json or text
     
-    @property
-    def allowed_origins_list(self) -> list:
-        """Convert comma-separated origins to list"""
-        if self.allowed_origins == "*":
-            return ["*"]
-        return self.allowed_origins.split(",")
+    # Storage Configuration
+    storage_backend: str = "local"  # local, s3, gcs
+    storage_bucket: Optional[str] = None
+    storage_region: Optional[str] = None
     
     class Config:
         env_file = ".env"
-        env_file_encoding = "utf-8"
+        case_sensitive = False
+        
+    def get_redis_url(self) -> str:
+        """Get Redis connection URL"""
+        if self.redis_password:
+            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+        return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+    
+    def get_upload_path(self) -> str:
+        """Get full upload directory path"""
+        return os.path.abspath(self.upload_directory)
+    
+    def validate_mistral_config(self) -> bool:
+        """Validate Mistral API configuration"""
+        if not self.mistral_api_key:
+            raise ValueError("MISTRAL_API_KEY environment variable is required")
+        return True
 
-# Create global settings instance
+# Create settings instance
 settings = Settings()
+
+# Validate critical configurations on import
+if settings.environment == "production":
+    settings.validate_mistral_config()

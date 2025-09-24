@@ -1,343 +1,265 @@
 """
-Agent Orchestrator - Coordinates the agentic processing pipeline
-Manages the flow of documents through all processing agents
+Agent Orchestrator
+
+Coordinates the execution of multiple agents in the document processing pipeline.
+Manages state transitions, error handling, and pipeline flow control.
 """
 
+from typing import Dict, List, Any, Optional
+from enum import Enum
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional
 from datetime import datetime
-from .validation_agent import ValidationAgent
-from .classification_agent import ClassificationAgent
-from .mistral_ocr_agent import MistralOCRAgent
-from .content_analysis_agent import ContentAnalysisAgent
-from .schema_generation_agent import SchemaGenerationAgent
+from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
+from .base_agent import BaseAgent, AgentContext, AgentResult, AgentStatus
+
+class PipelineStage(str, Enum):
+    """Pipeline execution stages"""
+    RECEIVED = "received"
+    CLASSIFICATION = "classification"
+    OCR = "ocr"
+    ANALYSIS = "analysis"
+    SCHEMA_GENERATION = "schema_generation"
+    VALIDATION = "validation"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class PipelineState(BaseModel):
+    """Pipeline execution state"""
+    stage: PipelineStage
+    job_id: str
+    document_id: str
+    started_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime] = None
+    agent_results: Dict[str, AgentResult] = Field(default_factory=dict)
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class DocumentData(BaseModel):
+    """Document data passed through the pipeline"""
+    file_path: str
+    mime_type: str
+    file_size: int
+    content_hash: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class AgentOrchestrator:
-    """Orchestrates the entire agentic processing pipeline"""
+    """
+    Orchestrates agent execution in the document processing pipeline
+    """
     
-    def __init__(self, mistral_api_key: Optional[str] = None):
-        # Initialize all agents
-        self.validation_agent = ValidationAgent()
-        self.classification_agent = ClassificationAgent()
-        self.mistral_ocr_agent = MistralOCRAgent(api_key=mistral_api_key)
-        self.content_analysis_agent = ContentAnalysisAgent()
-        self.schema_generation_agent = SchemaGenerationAgent()
+    def __init__(self):
+        self.logger = logging.getLogger("orchestrator")
+        self.agents: Dict[str, BaseAgent] = {}
+        self.pipeline_states: Dict[str, PipelineState] = {}
         
-        # Processing pipeline definition
-        self.pipeline_stages = [
-            ("validation", self.validation_agent),
-            ("classification", self.classification_agent),
-            ("ocr_processing", self.mistral_ocr_agent),
-            ("content_analysis", self.content_analysis_agent),
-            ("schema_generation", self.schema_generation_agent)
-        ]
-        
-        # Orchestrator metrics
-        self.metrics = {
-            "documents_processed": 0,
-            "successful_completions": 0,
-            "failed_processing": 0,
-            "average_pipeline_time": 0.0,
-            "agent_performance": {}
-        }
-        
-        logger.info("AgentOrchestrator initialized with 5-stage pipeline")
-    
-    async def process_document(self, document_data: Dict[str, Any], 
-                              status_callback: Optional[callable] = None) -> Dict[str, Any]:
+    def register_agent(self, stage: str, agent: BaseAgent):
         """
-        Process document through the complete agentic pipeline
+        Register an agent for a specific pipeline stage
         
         Args:
-            document_data: Initial document data with content and metadata
-            status_callback: Optional callback for status updates
+            stage: Pipeline stage name
+            agent: Agent instance
+        """
+        self.agents[stage] = agent
+        self.logger.info(f"Registered agent {agent.name} for stage {stage}")
+        
+    async def execute_pipeline(
+        self,
+        document: DocumentData,
+        context: AgentContext
+    ) -> PipelineState:
+        """
+        Execute the complete document processing pipeline
+        
+        Args:
+            document: Document data to process
+            context: Agent execution context
             
         Returns:
-            Complete processing results from all agents
+            Final pipeline state with all results
         """
-        start_time = asyncio.get_event_loop().time()
-        document_id = document_data.get("document_id", "unknown")
-        
-        logger.info(f"Starting agentic pipeline for document {document_id}")
-        
-        # Initialize results dictionary
-        pipeline_results = {
-            "document_id": document_id,
-            "pipeline_start_time": datetime.utcnow().isoformat(),
-            "stages_completed": [],
-            "current_stage": "initializing",
-            "overall_success": False,
-            "error_details": None,
-            "agent_results": {}
-        }
-        
-        try:
-            # Pass data through each stage of the pipeline
-            current_data = document_data.copy()
-            
-            for stage_name, agent in self.pipeline_stages:
-                stage_start_time = asyncio.get_event_loop().time()
-                
-                try:
-                    logger.info(f"Processing stage '{stage_name}' for document {document_id}")
-                    
-                    # Update status callback if provided
-                    if status_callback:
-                        await status_callback(document_id, stage_name, "processing")
-                    
-                    # Update pipeline status
-                    pipeline_results["current_stage"] = stage_name
-                    
-                    # Process with current agent
-                    agent_result = await agent.process(current_data)
-                    
-                    # Check if agent processing was successful
-                    if not agent_result.get("success", False):
-                        error_msg = f"Agent {agent.name} failed: {agent_result.get('error', 'Unknown error')}"
-                        logger.error(error_msg)
-                        pipeline_results["error_details"] = error_msg
-                        
-                        if status_callback:
-                            await status_callback(document_id, stage_name, "failed")
-                        
-                        break
-                    
-                    # Store agent result
-                    pipeline_results["agent_results"][stage_name] = agent_result
-                    
-                    # Update current data with results for next stage
-                    current_data.update(agent_result)
-                    
-                    # Track stage completion
-                    stage_time = asyncio.get_event_loop().time() - stage_start_time
-                    pipeline_results["stages_completed"].append({
-                        "stage": stage_name,
-                        "agent": agent.name,
-                        "completed_at": datetime.utcnow().isoformat(),
-                        "processing_time": stage_time
-                    })
-                    
-                    logger.info(f"Stage '{stage_name}' completed successfully for document {document_id}")
-                    
-                    if status_callback:
-                        await status_callback(document_id, stage_name, "completed")
-                
-                except Exception as stage_error:
-                    error_msg = f"Stage '{stage_name}' failed with error: {str(stage_error)}"
-                    logger.error(error_msg)
-                    pipeline_results["error_details"] = error_msg
-                    
-                    if status_callback:
-                        await status_callback(document_id, stage_name, "error")
-                    
-                    break
-            
-            # Determine overall success
-            pipeline_results["overall_success"] = len(pipeline_results["stages_completed"]) == len(self.pipeline_stages)
-            pipeline_results["total_processing_time"] = asyncio.get_event_loop().time() - start_time
-            pipeline_results["pipeline_end_time"] = datetime.utcnow().isoformat()
-            
-            # Update metrics
-            await self._update_metrics(pipeline_results)
-            
-            if pipeline_results["overall_success"]:
-                logger.info(f"Pipeline completed successfully for document {document_id}")
-                if status_callback:
-                    await status_callback(document_id, "completed", "success")
-            else:
-                logger.error(f"Pipeline failed for document {document_id}")
-                if status_callback:
-                    await status_callback(document_id, "failed", "error")
-            
-            return pipeline_results
-            
-        except Exception as e:
-            total_time = asyncio.get_event_loop().time() - start_time
-            error_msg = f"Pipeline orchestration failed: {str(e)}"
-            logger.error(error_msg)
-            
-            pipeline_results.update({
-                "overall_success": False,
-                "error_details": error_msg,
-                "total_processing_time": total_time,
-                "pipeline_end_time": datetime.utcnow().isoformat()
-            })
-            
-            if status_callback:
-                await status_callback(document_id, "orchestration", "critical_error")
-            
-            return pipeline_results
-    
-    async def _update_metrics(self, pipeline_results: Dict[str, Any]):
-        """Update orchestrator performance metrics"""
-        self.metrics["documents_processed"] += 1
-        
-        if pipeline_results["overall_success"]:
-            self.metrics["successful_completions"] += 1
-        else:
-            self.metrics["failed_processing"] += 1
-        
-        # Update average pipeline time
-        total_time = pipeline_results.get("total_processing_time", 0.0)
-        current_avg = self.metrics["average_pipeline_time"]
-        processed_count = self.metrics["documents_processed"]
-        
-        self.metrics["average_pipeline_time"] = (
-            (current_avg * (processed_count - 1) + total_time) / processed_count
+        # Initialize pipeline state
+        state = PipelineState(
+            stage=PipelineStage.RECEIVED,
+            job_id=context.job_id,
+            document_id=context.document_id,
+            started_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
         )
         
-        # Update agent performance metrics
-        for stage_info in pipeline_results.get("stages_completed", []):
-            agent_name = stage_info.get("agent", "unknown")
-            processing_time = stage_info.get("processing_time", 0.0)
+        self.pipeline_states[context.job_id] = state
+        
+        try:
+            # Stage 1: Document Classification
+            state.stage = PipelineStage.CLASSIFICATION
+            state.updated_at = datetime.utcnow()
             
-            if agent_name not in self.metrics["agent_performance"]:
-                self.metrics["agent_performance"][agent_name] = {
-                    "total_calls": 0,
-                    "successful_calls": 0,
-                    "average_time": 0.0
+            if "classification" in self.agents:
+                classification_result = await self.agents["classification"].execute(
+                    document, context
+                )
+                state.agent_results["classification"] = classification_result
+                
+                if classification_result.status == AgentStatus.FAILED:
+                    raise Exception(f"Classification failed: {classification_result.error}")
+            
+            # Stage 2: OCR Processing
+            state.stage = PipelineStage.OCR
+            state.updated_at = datetime.utcnow()
+            
+            if "ocr" in self.agents:
+                ocr_input = {
+                    "file_path": document.file_path,
+                    "mime_type": document.mime_type,
+                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
                 }
+                
+                ocr_result = await self.agents["ocr"].execute(
+                    ocr_input, context
+                )
+                state.agent_results["ocr"] = ocr_result
+                
+                if ocr_result.status == AgentStatus.FAILED:
+                    raise Exception(f"OCR failed: {ocr_result.error}")
             
-            agent_metrics = self.metrics["agent_performance"][agent_name]
-            agent_metrics["total_calls"] += 1
-            agent_metrics["successful_calls"] += 1
+            # Stage 3: Content Analysis
+            state.stage = PipelineStage.ANALYSIS
+            state.updated_at = datetime.utcnow()
             
-            # Update average time
-            total_calls = agent_metrics["total_calls"]
-            current_avg = agent_metrics["average_time"]
-            agent_metrics["average_time"] = (
-                (current_avg * (total_calls - 1) + processing_time) / total_calls
-            )
+            if "analysis" in self.agents:
+                analysis_input = {
+                    "extracted_text": state.agent_results.get("ocr", {}).get("data", {}).get("text", ""),
+                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
+                }
+                
+                analysis_result = await self.agents["analysis"].execute(
+                    analysis_input, context
+                )
+                state.agent_results["analysis"] = analysis_result
+                
+                if analysis_result.status == AgentStatus.FAILED:
+                    raise Exception(f"Analysis failed: {analysis_result.error}")
+            
+            # Stage 4: Schema Generation
+            state.stage = PipelineStage.SCHEMA_GENERATION
+            state.updated_at = datetime.utcnow()
+            
+            if "schema" in self.agents:
+                schema_input = {
+                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown"),
+                    "extracted_data": state.agent_results.get("analysis", {}).get("data", {})
+                }
+                
+                schema_result = await self.agents["schema"].execute(
+                    schema_input, context
+                )
+                state.agent_results["schema"] = schema_result
+                
+                if schema_result.status == AgentStatus.FAILED:
+                    raise Exception(f"Schema generation failed: {schema_result.error}")
+            
+            # Stage 5: Validation
+            state.stage = PipelineStage.VALIDATION
+            state.updated_at = datetime.utcnow()
+            
+            if "validation" in self.agents:
+                validation_input = {
+                    "schema": state.agent_results.get("schema", {}).get("data", {}),
+                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
+                }
+                
+                validation_result = await self.agents["validation"].execute(
+                    validation_input, context
+                )
+                state.agent_results["validation"] = validation_result
+                
+                if validation_result.status == AgentStatus.FAILED:
+                    raise Exception(f"Validation failed: {validation_result.error}")
+            
+            # Pipeline completed successfully
+            state.stage = PipelineStage.COMPLETED
+            state.completed_at = datetime.utcnow()
+            state.updated_at = datetime.utcnow()
+            
+            self.logger.info(f"Pipeline completed for job {context.job_id}")
+            
+        except Exception as e:
+            # Pipeline failed
+            state.stage = PipelineStage.FAILED
+            state.error = str(e)
+            state.updated_at = datetime.utcnow()
+            
+            self.logger.error(f"Pipeline failed for job {context.job_id}: {e}")
+            
+        finally:
+            self.pipeline_states[context.job_id] = state
+            
+        return state
     
-    async def get_pipeline_status(self) -> Dict[str, Any]:
-        """Get current pipeline status and metrics"""
-        agent_statuses = {}
-        
-        for stage_name, agent in self.pipeline_stages:
-            agent_statuses[stage_name] = {
-                "agent_name": agent.name,
-                "agent_version": agent.version,
-                "status": agent.status,
-                "metrics": agent.metrics
-            }
-        
-        return {
-            "orchestrator_metrics": self.metrics,
-            "agent_statuses": agent_statuses,
-            "pipeline_stages": [stage for stage, _ in self.pipeline_stages],
-            "health_status": await self._check_pipeline_health()
-        }
-    
-    async def _check_pipeline_health(self) -> Dict[str, Any]:
-        """Check health of all agents in pipeline"""
-        health_status = {
-            "overall_healthy": True,
-            "agent_health": {},
-            "issues": []
-        }
-        
-        for stage_name, agent in self.pipeline_stages:
-            agent_healthy = True
-            agent_issues = []
-            
-            # Check agent-specific health
-            if hasattr(agent, 'health_check'):
-                try:
-                    agent_health = await agent.health_check()
-                    agent_healthy = agent_health.get("status") in ["healthy", "simulation"]
-                    if not agent_healthy:
-                        agent_issues.append(agent_health.get("error", "Unknown health issue"))
-                except Exception as e:
-                    agent_healthy = False
-                    agent_issues.append(f"Health check failed: {str(e)}")
-            
-            # Check basic agent status
-            if agent.status not in ["active", "simulation"]:
-                agent_healthy = False
-                agent_issues.append(f"Agent status is {agent.status}")
-            
-            health_status["agent_health"][stage_name] = {
-                "healthy": agent_healthy,
-                "issues": agent_issues
-            }
-            
-            if not agent_healthy:
-                health_status["overall_healthy"] = False
-                health_status["issues"].extend([f"{stage_name}: {issue}" for issue in agent_issues])
-        
-        return health_status
-    
-    async def process_batch(self, documents: List[Dict[str, Any]], 
-                           max_concurrent: int = 3) -> List[Dict[str, Any]]:
+    async def execute_parallel_stages(
+        self,
+        stages: List[str],
+        context: AgentContext
+    ) -> Dict[str, AgentResult]:
         """
-        Process multiple documents concurrently
+        Execute multiple pipeline stages in parallel
         
         Args:
-            documents: List of document data dictionaries
-            max_concurrent: Maximum concurrent processing limit
+            stages: List of stage names to execute
+            context: Agent execution context
             
         Returns:
-            List of processing results
+            Dictionary of stage results
         """
-        logger.info(f"Starting batch processing of {len(documents)} documents")
+        tasks = []
+        stage_names = []
         
-        # Create semaphore to limit concurrent processing
-        semaphore = asyncio.Semaphore(max_concurrent)
+        for stage in stages:
+            if stage in self.agents:
+                tasks.append(self.agents[stage].execute({}, context))
+                stage_names.append(stage)
         
-        async def process_single(doc_data):
-            async with semaphore:
-                return await self.process_document(doc_data)
-        
-        # Process all documents concurrently with limit
-        tasks = [process_single(doc) for doc in documents]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Handle any exceptions in results
-        processed_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                processed_results.append({
-                    "document_id": documents[i].get("document_id", f"doc_{i}"),
-                    "overall_success": False,
-                    "error_details": f"Batch processing exception: {str(result)}"
-                })
-            else:
-                processed_results.append(result)
-        
-        logger.info(f"Batch processing completed: {len(processed_results)} results")
-        return processed_results
-    
-    async def get_agent_by_name(self, agent_name: str):
-        """Get specific agent by name"""
-        agent_map = {
-            "validation_agent": self.validation_agent,
-            "classification_agent": self.classification_agent,
-            "mistral_ocr_agent": self.mistral_ocr_agent,
-            "content_analysis_agent": self.content_analysis_agent,
-            "schema_generation_agent": self.schema_generation_agent
+        return {
+            stage: result if not isinstance(result, Exception) else None
+            for stage, result in zip(stage_names, results)
         }
-        return agent_map.get(agent_name)
     
-    async def reset_metrics(self):
-        """Reset all orchestrator metrics"""
-        self.metrics = {
-            "documents_processed": 0,
-            "successful_completions": 0,
-            "failed_processing": 0,
-            "average_pipeline_time": 0.0,
-            "agent_performance": {}
+    def get_pipeline_state(self, job_id: str) -> Optional[PipelineState]:
+        """
+        Get current pipeline state for a job
+        
+        Args:
+            job_id: Job identifier
+            
+        Returns:
+            Pipeline state or None if not found
+        """
+        return self.pipeline_states.get(job_id)
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform health check on all registered agents
+        
+        Returns:
+            Health status of all agents
+        """
+        health_status = {
+            "orchestrator": "healthy",
+            "agents": {}
         }
         
-        # Reset individual agent metrics
-        for _, agent in self.pipeline_stages:
-            agent.metrics = {
-                "processed_count": 0,
-                "success_count": 0,
-                "error_count": 0,
-                "average_processing_time": 0.0
-            }
+        for stage, agent in self.agents.items():
+            try:
+                health_status["agents"][stage] = await agent.health_check()
+            except Exception as e:
+                health_status["agents"][stage] = {
+                    "status": "unhealthy",
+                    "error": str(e)
+                }
         
-        logger.info("All metrics reset successfully")
+        return health_status

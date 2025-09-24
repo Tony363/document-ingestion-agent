@@ -1,84 +1,196 @@
 """
-Base agent class for the agentic processing system
+Base Agent Abstract Class
+
+Provides the foundation for all document processing agents with:
+- Async execution support
+- Standardized logging
+- Metrics collection
+- Error boundaries
+- Retry logic
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Any, Dict, Optional, TypeVar, Generic
+import asyncio
+import time
 import logging
+from enum import Enum
+from pydantic import BaseModel, Field
+import uuid
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
+T = TypeVar('T', bound=BaseModel)
+R = TypeVar('R', bound=BaseModel)
 
-class BaseAgent(ABC):
-    """Base class for all processing agents"""
+class AgentStatus(str, Enum):
+    """Agent execution status"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    RETRYING = "retrying"
+
+class AgentMetrics(BaseModel):
+    """Metrics collected during agent execution"""
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+    retry_count: int = 0
+    error_count: int = 0
+    confidence_score: Optional[float] = None
+
+class AgentContext(BaseModel):
+    """Shared context passed between agents"""
+    job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    document_id: str
+    correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
-    def __init__(self, name: str, version: str = "1.0.0"):
+class AgentResult(BaseModel, Generic[R]):
+    """Standard result wrapper for all agents"""
+    agent_name: str
+    status: AgentStatus
+    data: Optional[R] = None
+    error: Optional[str] = None
+    metrics: AgentMetrics
+    context: AgentContext
+
+class BaseAgent(ABC, Generic[T, R]):
+    """
+    Abstract base class for all document processing agents
+    
+    Type Parameters:
+        T: Input data type (Pydantic model)
+        R: Output data type (Pydantic model)
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+        timeout: float = 30.0
+    ):
         self.name = name
-        self.version = version
-        self.status = "initialized"
-        self.created_at = datetime.utcnow()
-        self.metrics = {
-            "processed_count": 0,
-            "success_count": 0,
-            "error_count": 0,
-            "average_processing_time": 0.0
-        }
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout = timeout
+        self.logger = logging.getLogger(f"agent.{name}")
         
     @abstractmethod
-    async def process(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, input_data: T, context: AgentContext) -> R:
         """
-        Process document data and return results
+        Core processing logic to be implemented by each agent
         
         Args:
-            document_data: Dictionary containing document information and content
+            input_data: Agent-specific input data
+            context: Shared agent context
             
         Returns:
-            Dictionary with processing results
+            Agent-specific output data
         """
         pass
     
-    def get_status(self) -> Dict[str, Any]:
-        """Get agent status and metrics"""
+    @abstractmethod
+    async def validate_input(self, input_data: T) -> bool:
+        """
+        Validate input data before processing
+        
+        Args:
+            input_data: Input data to validate
+            
+        Returns:
+            True if input is valid, False otherwise
+        """
+        pass
+    
+    async def execute(
+        self,
+        input_data: T,
+        context: AgentContext
+    ) -> AgentResult[R]:
+        """
+        Execute agent with error handling and retry logic
+        
+        Args:
+            input_data: Agent-specific input data
+            context: Shared agent context
+            
+        Returns:
+            AgentResult containing output data or error
+        """
+        metrics = AgentMetrics(start_time=datetime.utcnow())
+        status = AgentStatus.PENDING
+        result_data = None
+        error = None
+        
+        try:
+            # Validate input
+            if not await self.validate_input(input_data):
+                raise ValueError(f"Invalid input data for {self.name}")
+            
+            status = AgentStatus.RUNNING
+            self.logger.info(f"Executing {self.name} for job {context.job_id}")
+            
+            # Execute with retries
+            for attempt in range(self.max_retries):
+                try:
+                    # Execute with timeout
+                    result_data = await asyncio.wait_for(
+                        self.process(input_data, context),
+                        timeout=self.timeout
+                    )
+                    status = AgentStatus.COMPLETED
+                    break
+                    
+                except asyncio.TimeoutError:
+                    metrics.error_count += 1
+                    error = f"Timeout after {self.timeout}s"
+                    self.logger.warning(f"{self.name} timeout on attempt {attempt + 1}")
+                    
+                except Exception as e:
+                    metrics.error_count += 1
+                    error = str(e)
+                    self.logger.error(f"{self.name} error on attempt {attempt + 1}: {e}")
+                    
+                    if attempt < self.max_retries - 1:
+                        status = AgentStatus.RETRYING
+                        metrics.retry_count += 1
+                        await asyncio.sleep(self.retry_delay * (2 ** attempt))
+                    else:
+                        status = AgentStatus.FAILED
+                        
+        except Exception as e:
+            status = AgentStatus.FAILED
+            error = str(e)
+            self.logger.error(f"{self.name} failed: {e}")
+            
+        finally:
+            metrics.end_time = datetime.utcnow()
+            metrics.duration_ms = int(
+                (metrics.end_time - metrics.start_time).total_seconds() * 1000
+            )
+            
+        return AgentResult(
+            agent_name=self.name,
+            status=status,
+            data=result_data,
+            error=error,
+            metrics=metrics,
+            context=context
+        )
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform health check for the agent
+        
+        Returns:
+            Health status dictionary
+        """
         return {
             "name": self.name,
-            "version": self.version,
-            "status": self.status,
-            "created_at": self.created_at.isoformat(),
-            "metrics": self.metrics
-        }
-    
-    async def validate_input(self, document_data: Dict[str, Any]) -> bool:
-        """Validate input data before processing"""
-        required_fields = ["document_id", "content"]
-        
-        for field in required_fields:
-            if field not in document_data:
-                logger.error(f"Missing required field in {self.name}: {field}")
-                return False
-                
-        return True
-    
-    def update_metrics(self, success: bool, processing_time: float):
-        """Update agent processing metrics"""
-        self.metrics["processed_count"] += 1
-        
-        if success:
-            self.metrics["success_count"] += 1
-        else:
-            self.metrics["error_count"] += 1
-            
-        # Update rolling average of processing time
-        total_time = self.metrics["average_processing_time"] * (self.metrics["processed_count"] - 1)
-        self.metrics["average_processing_time"] = (total_time + processing_time) / self.metrics["processed_count"]
-    
-    async def handle_error(self, error: Exception, document_id: str) -> Dict[str, Any]:
-        """Handle processing errors consistently across agents"""
-        logger.error(f"Error in {self.name} processing document {document_id}: {str(error)}")
-        
-        return {
-            "success": False,
-            "error": str(error),
-            "agent": self.name,
-            "document_id": document_id,
-            "timestamp": datetime.utcnow().isoformat()
+            "status": "healthy",
+            "max_retries": self.max_retries,
+            "timeout": self.timeout
         }

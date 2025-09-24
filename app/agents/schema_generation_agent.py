@@ -1,606 +1,436 @@
 """
-Schema Generation Agent - Dynamic JSON schema creation
-Generates structured JSON schemas based on extracted content and document type
+Schema Generation Agent
+
+Generates JSON schemas from extracted data that can be used
+to trigger webhooks and API automations.
 """
 
-import asyncio
-import logging
-import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from .base_agent import BaseAgent
+import json
+import uuid
+from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
+from .base_agent import BaseAgent, AgentContext
+from .content_analysis_agent import ExtractedField, ExtractedTable
 
-class SchemaGenerationAgent(BaseAgent):
-    """Agent responsible for generating dynamic JSON schemas"""
+class SchemaInput(BaseModel):
+    """Input for schema generation"""
+    document_type: str
+    extracted_data: Dict[str, Any]
+    fields: Optional[List[ExtractedField]] = None
+    tables: Optional[List[ExtractedTable]] = None
+
+class WebhookTrigger(BaseModel):
+    """Webhook trigger configuration"""
+    trigger_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    action: str  # "webhook", "api_call", "email", "database"
+    endpoint: Optional[str] = None
+    method: str = "POST"
+    headers: Dict[str, str] = Field(default_factory=dict)
+    condition: Optional[Dict[str, Any]] = None
+    payload_template: Optional[Dict[str, Any]] = None
+
+class DocumentSchema(BaseModel):
+    """Generated document schema"""
+    schema_version: str = "1.0"
+    schema_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    document_id: str
+    document_type: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    confidence_score: float
+    
+    # Extracted structured data
+    extracted_data: Dict[str, Any]
+    
+    # Processing metadata
+    processing_metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Automation triggers
+    automation_triggers: List[WebhookTrigger] = Field(default_factory=list)
+    
+    # Validation status
+    validation_status: str = "pending"
+    validation_errors: List[str] = Field(default_factory=list)
+
+class SchemaGenerationAgent(BaseAgent[SchemaInput, DocumentSchema]):
+    """
+    Agent for generating JSON schemas from extracted document data
+    """
+    
+    # Template mappings for different document types
+    SCHEMA_TEMPLATES = {
+        "invoice": {
+            "required_fields": ["invoice_number", "vendor_name", "total_amount"],
+            "optional_fields": ["invoice_date", "due_date", "po_number", "line_items"],
+            "triggers": [
+                {
+                    "action": "webhook",
+                    "condition": {"total_amount": {"$gte": 1000}},
+                    "endpoint": "/api/invoices/high-value"
+                },
+                {
+                    "action": "webhook",
+                    "condition": {"due_date": {"$exists": True}},
+                    "endpoint": "/api/invoices/payable"
+                }
+            ]
+        },
+        "receipt": {
+            "required_fields": ["merchant_name", "total_amount", "transaction_date"],
+            "optional_fields": ["receipt_number", "payment_method", "items"],
+            "triggers": [
+                {
+                    "action": "webhook",
+                    "endpoint": "/api/receipts/process"
+                }
+            ]
+        },
+        "contract": {
+            "required_fields": ["party1", "party2", "effective_date"],
+            "optional_fields": ["end_date", "contract_value", "terms"],
+            "triggers": [
+                {
+                    "action": "webhook",
+                    "endpoint": "/api/contracts/new"
+                },
+                {
+                    "action": "email",
+                    "condition": {"end_date": {"$exists": True}},
+                    "endpoint": "legal@company.com"
+                }
+            ]
+        },
+        "form": {
+            "required_fields": [],
+            "optional_fields": ["email", "phone", "name"],
+            "triggers": [
+                {
+                    "action": "webhook",
+                    "endpoint": "/api/forms/submission"
+                }
+            ]
+        }
+    }
     
     def __init__(self):
-        super().__init__("schema_generation_agent", "1.0.0")
+        super().__init__(
+            name="schema_generation_agent",
+            max_retries=2,
+            timeout=20.0
+        )
         
-        # Base schema templates for different document types
-        self.schema_templates = {
-            "invoice": {
-                "type": "object",
-                "required": ["document_type", "extraction_confidence", "content", "metadata"],
-                "properties": {
-                    "document_type": {"type": "string", "const": "invoice"},
-                    "extraction_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "content": {
-                        "type": "object",
-                        "required": ["vendor_info", "invoice_details"],
-                        "properties": {
-                            "vendor_info": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "address": {"type": "string"},
-                                    "tax_id": {"type": "string"},
-                                    "phone": {"type": "string"},
-                                    "email": {"type": "string"}
-                                }
-                            },
-                            "invoice_details": {
-                                "type": "object",
-                                "properties": {
-                                    "invoice_number": {"type": "string"},
-                                    "date": {"type": "string", "format": "date"},
-                                    "due_date": {"type": "string", "format": "date"},
-                                    "po_number": {"type": "string"}
-                                }
-                            },
-                            "line_items": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "description": {"type": "string"},
-                                        "quantity": {"type": "number"},
-                                        "unit_price": {"type": "number"},
-                                        "total": {"type": "number"}
-                                    }
-                                }
-                            },
-                            "totals": {
-                                "type": "object",
-                                "properties": {
-                                    "subtotal": {"type": "number"},
-                                    "tax": {"type": "number"},
-                                    "total": {"type": "number"},
-                                    "currency": {"type": "string", "default": "USD"}
-                                }
-                            }
-                        }
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "properties": {
-                            "pages": {"type": "integer"},
-                            "processing_time": {"type": "number"},
-                            "language": {"type": "string"},
-                            "ocr_confidence": {"type": "number"}
-                        }
-                    },
-                    "webhook_ready": {"type": "boolean"}
-                }
-            },
-            
-            "receipt": {
-                "type": "object",
-                "required": ["document_type", "extraction_confidence", "content"],
-                "properties": {
-                    "document_type": {"type": "string", "const": "receipt"},
-                    "extraction_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "content": {
-                        "type": "object",
-                        "required": ["merchant_info", "transaction_details"],
-                        "properties": {
-                            "merchant_info": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "address": {"type": "string"},
-                                    "phone": {"type": "string"}
-                                }
-                            },
-                            "transaction_details": {
-                                "type": "object",
-                                "properties": {
-                                    "receipt_number": {"type": "string"},
-                                    "date": {"type": "string", "format": "date"},
-                                    "time": {"type": "string", "format": "time"}
-                                }
-                            },
-                            "items": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "quantity": {"type": "number"},
-                                        "price": {"type": "number"}
-                                    }
-                                }
-                            },
-                            "payment": {
-                                "type": "object",
-                                "properties": {
-                                    "method": {"type": "string"},
-                                    "total": {"type": "number"},
-                                    "tax": {"type": "number"},
-                                    "currency": {"type": "string", "default": "USD"}
-                                }
-                            }
-                        }
-                    },
-                    "webhook_ready": {"type": "boolean"}
-                }
-            },
-            
-            "contract": {
-                "type": "object",
-                "required": ["document_type", "extraction_confidence", "content"],
-                "properties": {
-                    "document_type": {"type": "string", "const": "contract"},
-                    "extraction_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "content": {
-                        "type": "object",
-                        "properties": {
-                            "contract_info": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"},
-                                    "type": {"type": "string"},
-                                    "effective_date": {"type": "string", "format": "date"},
-                                    "expiration_date": {"type": "string", "format": "date"}
-                                }
-                            },
-                            "parties": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "role": {"type": "string"},
-                                        "address": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "terms": {
-                                "type": "object",
-                                "properties": {
-                                    "summary": {"type": "string"},
-                                    "key_clauses": {"type": "array", "items": {"type": "string"}}
-                                }
-                            }
-                        }
-                    },
-                    "webhook_ready": {"type": "boolean"}
-                }
-            },
-            
-            "form": {
-                "type": "object",
-                "required": ["document_type", "extraction_confidence", "content"],
-                "properties": {
-                    "document_type": {"type": "string", "const": "form"},
-                    "extraction_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "content": {
-                        "type": "object",
-                        "properties": {
-                            "form_info": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"},
-                                    "type": {"type": "string"},
-                                    "date": {"type": "string", "format": "date"}
-                                }
-                            },
-                            "fields": {
-                                "type": "object",
-                                "additionalProperties": {
-                                    "type": "object",
-                                    "properties": {
-                                        "value": {"type": "string"},
-                                        "field_type": {"type": "string"},
-                                        "required": {"type": "boolean"}
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "webhook_ready": {"type": "boolean"}
-                }
-            }
-        }
-        
-        # Schema version tracking
-        self.schema_version = "1.0"
-        
-        self.status = "active"
-        logger.info("SchemaGenerationAgent initialized with templates for 4 document types")
+    async def validate_input(self, input_data: SchemaInput) -> bool:
+        """Validate schema generation input"""
+        if not input_data.document_type:
+            return False
+        return True
     
-    async def process(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(
+        self,
+        input_data: SchemaInput,
+        context: AgentContext
+    ) -> DocumentSchema:
         """
-        Generate JSON schema based on content analysis
+        Generate JSON schema from extracted data
         
         Args:
-            document_data: Contains content analysis results and classification
+            input_data: Schema input with extracted data
+            context: Agent execution context
             
         Returns:
-            Generated JSON schema ready for webhook delivery
+            Generated document schema
         """
-        start_time = asyncio.get_event_loop().time()
+        # Build extracted data structure
+        extracted_data = await self._build_extracted_data(input_data)
         
-        try:
-            if not await self.validate_input(document_data):
-                raise ValueError("Invalid input data for schema generation")
+        # Generate automation triggers based on document type
+        triggers = await self._generate_triggers(
+            input_data.document_type,
+            extracted_data
+        )
+        
+        # Calculate confidence score
+        confidence_score = await self._calculate_confidence(
+            input_data,
+            extracted_data
+        )
+        
+        # Build processing metadata
+        processing_metadata = {
+            "ocr_confidence": input_data.extracted_data.get("ocr_confidence", 0.0),
+            "extraction_method": input_data.extracted_data.get("extraction_method", "automatic"),
+            "processing_time_ms": input_data.extracted_data.get("processing_time_ms", 0),
+            "page_count": input_data.extracted_data.get("page_count", 1),
+            "has_tables": len(input_data.tables) > 0 if input_data.tables else False,
+            "field_count": len(input_data.fields) if input_data.fields else 0
+        }
+        
+        # Create document schema
+        schema = DocumentSchema(
+            document_id=context.document_id,
+            document_type=input_data.document_type,
+            confidence_score=confidence_score,
+            extracted_data=extracted_data,
+            processing_metadata=processing_metadata,
+            automation_triggers=triggers
+        )
+        
+        return schema
+    
+    async def _build_extracted_data(self, input_data: SchemaInput) -> Dict[str, Any]:
+        """
+        Build structured extracted data from fields and tables
+        
+        Args:
+            input_data: Input with extracted fields and tables
             
-            document_id = document_data["document_id"]
-            content_analysis = document_data.get("content_analysis", {})
-            classification = document_data.get("classification", {})
-            ocr_result = document_data.get("ocr_result", {})
-            
-            logger.info(f"Generating schema for document {document_id}")
-            
-            # Extract key information
-            document_type = classification.get("document_type", "unknown")
-            extracted_fields = content_analysis.get("extracted_fields", {})
-            confidence_scores = content_analysis.get("confidence_scores", {})
-            
-            # Step 1: Select base template
-            base_template = await self._select_base_template(document_type)
-            
-            # Step 2: Generate schema data
-            schema_data = await self._generate_schema_data(
-                document_type, extracted_fields, content_analysis, ocr_result
-            )
-            
-            # Step 3: Validate schema against template
-            validation_result = await self._validate_schema_data(schema_data, base_template)
-            
-            # Step 4: Enhance schema with metadata
-            enhanced_schema = await self._enhance_schema(
-                schema_data, validation_result, document_data
-            )
-            
-            # Step 5: Determine webhook readiness
-            webhook_ready = await self._assess_webhook_readiness(
-                enhanced_schema, confidence_scores, validation_result
-            )
-            
-            processing_time = asyncio.get_event_loop().time() - start_time
-            self.update_metrics(True, processing_time)
-            
-            result = {
-                "success": True,
-                "document_id": document_id,
-                "generated_schema": {
-                    "schema_version": self.schema_version,
-                    "document_type": document_type,
-                    "data": enhanced_schema,
-                    "webhook_ready": webhook_ready,
-                    "validation": validation_result,
-                    "template_used": document_type,
-                    "generation_metadata": {
-                        "fields_mapped": len(extracted_fields),
-                        "confidence_threshold_met": confidence_scores.get("overall", 0.0) >= 0.7,
-                        "required_fields_present": validation_result.get("required_fields_valid", False)
+        Returns:
+            Structured data dictionary
+        """
+        extracted = {
+            "document_type": input_data.document_type,
+            "metadata": {},
+            "fields": {},
+            "tables": [],
+            "raw_data": input_data.extracted_data
+        }
+        
+        # Process fields
+        if input_data.fields:
+            for field in input_data.fields:
+                # Group related fields
+                if field.name in ["invoice_number", "receipt_number", "po_number"]:
+                    extracted["metadata"][field.name] = field.value
+                else:
+                    extracted["fields"][field.name] = {
+                        "value": field.value,
+                        "confidence": field.confidence
                     }
-                },
-                "processing_time": processing_time,
-                "agent": self.name,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            logger.info(f"Schema generation completed for document {document_id} (webhook_ready: {webhook_ready})")
-            return result
-            
-        except Exception as e:
-            processing_time = asyncio.get_event_loop().time() - start_time
-            self.update_metrics(False, processing_time)
-            return await self.handle_error(e, document_data.get("document_id", "unknown"))
-    
-    async def _select_base_template(self, document_type: str) -> Dict[str, Any]:
-        """Select appropriate schema template based on document type"""
-        if document_type in self.schema_templates:
-            return self.schema_templates[document_type].copy()
-        else:
-            logger.warning(f"No template found for document type: {document_type}, using generic")
-            return self._create_generic_template()
-    
-    def _create_generic_template(self) -> Dict[str, Any]:
-        """Create a generic schema template for unknown document types"""
-        return {
-            "type": "object",
-            "required": ["document_type", "extraction_confidence", "content"],
-            "properties": {
-                "document_type": {"type": "string"},
-                "extraction_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                "content": {
-                    "type": "object",
-                    "additionalProperties": True
-                },
-                "webhook_ready": {"type": "boolean"}
-            }
-        }
-    
-    async def _generate_schema_data(self, document_type: str, extracted_fields: Dict[str, Any], 
-                                   content_analysis: Dict[str, Any], ocr_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate the actual schema data based on extracted content"""
         
-        # Base schema structure
-        schema_data = {
-            "document_type": document_type,
-            "extraction_confidence": content_analysis.get("confidence_scores", {}).get("overall", 0.0),
-            "content": {},
-            "metadata": {
-                "pages": ocr_result.get("page_count", 1),
-                "processing_time": content_analysis.get("processing_time", 0.0),
-                "language": ocr_result.get("language", "en"),
-                "ocr_confidence": ocr_result.get("confidence", 0.0)
+        # Process tables
+        if input_data.tables:
+            for table in input_data.tables:
+                extracted["tables"].append({
+                    "headers": table.headers,
+                    "rows": table.rows,
+                    "row_count": len(table.rows),
+                    "confidence": table.confidence
+                })
+        
+        # Add document-specific structures
+        if input_data.document_type == "invoice":
+            extracted = await self._structure_invoice_data(extracted)
+        elif input_data.document_type == "receipt":
+            extracted = await self._structure_receipt_data(extracted)
+        elif input_data.document_type == "contract":
+            extracted = await self._structure_contract_data(extracted)
+        
+        return extracted
+    
+    async def _structure_invoice_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Structure invoice-specific data"""
+        invoice_structure = {
+            "invoice_details": {
+                "number": data.get("metadata", {}).get("invoice_number"),
+                "date": data.get("fields", {}).get("invoice_date", {}).get("value"),
+                "due_date": data.get("fields", {}).get("due_date", {}).get("value"),
+                "po_number": data.get("metadata", {}).get("po_number")
             },
-            "webhook_ready": False  # Will be determined later
+            "vendor": {
+                "name": data.get("fields", {}).get("vendor_name", {}).get("value"),
+                "tax_id": data.get("fields", {}).get("tax_id", {}).get("value")
+            },
+            "amounts": {
+                "subtotal": data.get("fields", {}).get("subtotal", {}).get("value"),
+                "tax": data.get("fields", {}).get("tax_amount", {}).get("value"),
+                "total": data.get("fields", {}).get("total_amount", {}).get("value")
+            },
+            "line_items": data.get("tables", [{}])[0].get("rows", []) if data.get("tables") else []
         }
         
-        # Document type specific content mapping
-        if document_type == "invoice":
-            schema_data["content"] = await self._map_invoice_content(extracted_fields, content_analysis)
-        elif document_type == "receipt":
-            schema_data["content"] = await self._map_receipt_content(extracted_fields, content_analysis)
-        elif document_type == "contract":
-            schema_data["content"] = await self._map_contract_content(extracted_fields, content_analysis)
-        elif document_type == "form":
-            schema_data["content"] = await self._map_form_content(extracted_fields, content_analysis)
-        else:
-            schema_data["content"] = await self._map_generic_content(extracted_fields, content_analysis)
-        
-        return schema_data
+        data["structured"] = invoice_structure
+        return data
     
-    async def _map_invoice_content(self, fields: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extracted fields to invoice schema structure"""
-        content = {
-            "vendor_info": {},
-            "invoice_details": {},
-            "line_items": [],
-            "totals": {}
+    async def _structure_receipt_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Structure receipt-specific data"""
+        receipt_structure = {
+            "transaction": {
+                "number": data.get("metadata", {}).get("receipt_number"),
+                "date": data.get("fields", {}).get("transaction_date", {}).get("value"),
+                "merchant": data.get("fields", {}).get("merchant_name", {}).get("value")
+            },
+            "payment": {
+                "method": data.get("fields", {}).get("payment_method", {}).get("value"),
+                "total": data.get("fields", {}).get("total_amount", {}).get("value")
+            },
+            "items": data.get("tables", [{}])[0].get("rows", []) if data.get("tables") else []
         }
         
-        # Map vendor information
-        if "vendor_name" in fields:
-            content["vendor_info"]["name"] = fields["vendor_name"]["value"]
-        
-        # Map invoice details
-        field_mapping = {
-            "invoice_number": "invoice_number",
-            "date": "date",
-            "due_date": "due_date"
-        }
-        
-        for field_key, schema_key in field_mapping.items():
-            if field_key in fields and fields[field_key]["valid"]:
-                content["invoice_details"][schema_key] = fields[field_key]["normalized_value"] or fields[field_key]["value"]
-        
-        # Map totals
-        if "total_amount" in fields and fields["total_amount"]["valid"]:
-            total_value = fields["total_amount"]["normalized_value"] or 0.0
-            content["totals"] = {
-                "total": total_value,
-                "currency": "USD"
+        data["structured"] = receipt_structure
+        return data
+    
+    async def _structure_contract_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Structure contract-specific data"""
+        contract_structure = {
+            "parties": {
+                "party1": data.get("fields", {}).get("party1", {}).get("value"),
+                "party2": data.get("fields", {}).get("party2", {}).get("value")
+            },
+            "dates": {
+                "effective": data.get("fields", {}).get("effective_date", {}).get("value"),
+                "termination": data.get("fields", {}).get("end_date", {}).get("value")
+            },
+            "terms": {
+                "value": data.get("fields", {}).get("contract_value", {}).get("value")
             }
+        }
         
-        # Extract line items from structured elements (simplified)
-        structured_elements = analysis.get("structured_elements", {})
-        tables = structured_elements.get("tables", [])
-        if tables:
-            content["line_items"] = [
-                {
-                    "description": "Extracted item",
-                    "total": self._extract_amount_from_line(table.get("content", ""))
+        data["structured"] = contract_structure
+        return data
+    
+    async def _generate_triggers(
+        self,
+        document_type: str,
+        extracted_data: Dict[str, Any]
+    ) -> List[WebhookTrigger]:
+        """
+        Generate automation triggers based on document type and data
+        
+        Args:
+            document_type: Type of document
+            extracted_data: Extracted data structure
+            
+        Returns:
+            List of webhook triggers
+        """
+        triggers = []
+        
+        # Get template triggers for document type
+        template = self.SCHEMA_TEMPLATES.get(document_type, {})
+        template_triggers = template.get("triggers", [])
+        
+        for trigger_template in template_triggers:
+            # Check if condition is met
+            condition = trigger_template.get("condition")
+            if condition:
+                if not await self._evaluate_condition(condition, extracted_data):
+                    continue
+            
+            # Create trigger
+            trigger = WebhookTrigger(
+                action=trigger_template.get("action", "webhook"),
+                endpoint=trigger_template.get("endpoint"),
+                method=trigger_template.get("method", "POST"),
+                condition=condition,
+                payload_template={
+                    "document_id": extracted_data.get("document_id"),
+                    "document_type": document_type,
+                    "data": extracted_data.get("structured", extracted_data)
                 }
-                for table in tables[:5]  # Limit to 5 items
-            ]
+            )
+            
+            triggers.append(trigger)
         
-        return content
-    
-    async def _map_receipt_content(self, fields: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extracted fields to receipt schema structure"""
-        content = {
-            "merchant_info": {},
-            "transaction_details": {},
-            "items": [],
-            "payment": {}
-        }
-        
-        # Map merchant information
-        if "merchant_name" in fields:
-            content["merchant_info"]["name"] = fields["merchant_name"]["value"]
-        
-        # Map transaction details
-        field_mapping = {
-            "receipt_number": "receipt_number",
-            "date": "date"
-        }
-        
-        for field_key, schema_key in field_mapping.items():
-            if field_key in fields and fields[field_key]["valid"]:
-                content["transaction_details"][schema_key] = fields[field_key]["normalized_value"] or fields[field_key]["value"]
-        
-        # Map payment information
-        if "total_amount" in fields and fields["total_amount"]["valid"]:
-            total_value = fields["total_amount"]["normalized_value"] or 0.0
-            content["payment"]["total"] = total_value
-            content["payment"]["currency"] = "USD"
-        
-        if "payment_method" in fields:
-            content["payment"]["method"] = fields["payment_method"]["value"]
-        
-        return content
-    
-    async def _map_contract_content(self, fields: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extracted fields to contract schema structure"""
-        content = {
-            "contract_info": {},
-            "parties": [],
-            "terms": {}
-        }
-        
-        # Map contract information
-        if "contract_title" in fields:
-            content["contract_info"]["title"] = fields["contract_title"]["value"]
-        
-        if "effective_date" in fields and fields["effective_date"]["valid"]:
-            content["contract_info"]["effective_date"] = fields["effective_date"]["normalized_value"]
-        
-        # Map parties (simplified)
-        if "parties" in fields:
-            content["parties"] = [
-                {"name": fields["parties"]["value"], "role": "party"}
-            ]
-        
-        # Map terms
-        if "terms" in fields:
-            content["terms"]["summary"] = fields["terms"]["value"]
-        
-        return content
-    
-    async def _map_form_content(self, fields: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extracted fields to form schema structure"""
-        content = {
-            "form_info": {},
-            "fields": {}
-        }
-        
-        # Map form information
-        if "form_title" in fields:
-            content["form_info"]["title"] = fields["form_title"]["value"]
-        
-        if "date_field" in fields and fields["date_field"]["valid"]:
-            content["form_info"]["date"] = fields["date_field"]["normalized_value"]
-        
-        # Map all other fields
-        for field_name, field_data in fields.items():
-            if field_name not in ["form_title", "date_field"]:
-                content["fields"][field_name] = {
-                    "value": field_data["value"],
-                    "field_type": field_data.get("field_type", "text"),
-                    "required": field_data.get("valid", False)
+        # Add default trigger if no triggers generated
+        if not triggers:
+            triggers.append(WebhookTrigger(
+                action="webhook",
+                endpoint=f"/api/documents/{document_type}",
+                payload_template={
+                    "document_type": document_type,
+                    "data": extracted_data
                 }
+            ))
         
-        return content
+        return triggers
     
-    async def _map_generic_content(self, fields: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extracted fields to generic content structure"""
-        content = {}
+    async def _evaluate_condition(
+        self,
+        condition: Dict[str, Any],
+        data: Dict[str, Any]
+    ) -> bool:
+        """
+        Evaluate trigger condition against data
         
-        for field_name, field_data in fields.items():
-            content[field_name] = {
-                "value": field_data["value"],
-                "confidence": field_data.get("confidence", 0.0),
-                "valid": field_data.get("valid", False)
-            }
-        
-        return content
-    
-    def _extract_amount_from_line(self, line: str) -> float:
-        """Extract monetary amount from a text line"""
-        import re
-        amount_match = re.search(r'\$?(\d+[.,]\d{2})', line)
-        if amount_match:
-            return float(amount_match.group(1).replace(',', '.'))
-        return 0.0
-    
-    async def _validate_schema_data(self, schema_data: Dict[str, Any], template: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate generated schema data against template"""
-        validation_result = {
-            "valid": True,
-            "errors": [],
-            "warnings": [],
-            "required_fields_valid": True,
-            "completeness_score": 0.0
-        }
-        
-        try:
-            # Check required fields
-            required_fields = template.get("required", [])
-            missing_required = []
+        Args:
+            condition: Condition to evaluate
+            data: Data to check against
             
-            for field in required_fields:
-                if field not in schema_data or not schema_data[field]:
-                    missing_required.append(field)
+        Returns:
+            True if condition is met
+        """
+        # Simple condition evaluation
+        # In production, use a proper expression evaluator
+        for field, constraint in condition.items():
+            field_value = data.get("fields", {}).get(field, {}).get("value")
             
-            if missing_required:
-                validation_result["errors"].append(f"Missing required fields: {missing_required}")
-                validation_result["required_fields_valid"] = False
-                validation_result["valid"] = False
+            if isinstance(constraint, dict):
+                if "$exists" in constraint:
+                    if constraint["$exists"] and field_value is None:
+                        return False
+                    elif not constraint["$exists"] and field_value is not None:
+                        return False
+                
+                if "$gte" in constraint and field_value:
+                    try:
+                        if float(field_value) < float(constraint["$gte"]):
+                            return False
+                    except:
+                        return False
+                
+                if "$lte" in constraint and field_value:
+                    try:
+                        if float(field_value) > float(constraint["$lte"]):
+                            return False
+                    except:
+                        return False
+            else:
+                if field_value != constraint:
+                    return False
+        
+        return True
+    
+    async def _calculate_confidence(
+        self,
+        input_data: SchemaInput,
+        extracted_data: Dict[str, Any]
+    ) -> float:
+        """
+        Calculate overall schema confidence
+        
+        Args:
+            input_data: Input data with confidence scores
+            extracted_data: Extracted data structure
             
-            # Calculate completeness score
-            total_possible_fields = len(template.get("properties", {}))
-            present_fields = len([k for k in schema_data.keys() if schema_data[k]])
-            validation_result["completeness_score"] = present_fields / total_possible_fields if total_possible_fields > 0 else 0.0
+        Returns:
+            Overall confidence score
+        """
+        confidence_scores = []
+        
+        # Add field confidences
+        if input_data.fields:
+            for field in input_data.fields:
+                confidence_scores.append(field.confidence)
+        
+        # Add table confidences
+        if input_data.tables:
+            for table in input_data.tables:
+                confidence_scores.append(table.confidence)
+        
+        # Add base confidence for document type
+        template = self.SCHEMA_TEMPLATES.get(input_data.document_type)
+        if template:
+            # Check if required fields are present
+            required_fields = template.get("required_fields", [])
+            present_fields = set(extracted_data.get("fields", {}).keys())
             
-        except Exception as e:
-            validation_result["errors"].append(f"Validation error: {str(e)}")
-            validation_result["valid"] = False
+            if required_fields:
+                completeness = len(present_fields.intersection(required_fields)) / len(required_fields)
+                confidence_scores.append(completeness)
         
-        return validation_result
-    
-    async def _enhance_schema(self, schema_data: Dict[str, Any], validation: Dict[str, Any], 
-                             document_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Enhance schema with additional metadata and processing information"""
-        enhanced_schema = schema_data.copy()
+        # Calculate average confidence
+        if confidence_scores:
+            return sum(confidence_scores) / len(confidence_scores)
         
-        # Add generation metadata
-        enhanced_schema["generation_info"] = {
-            "schema_version": self.schema_version,
-            "generated_at": datetime.utcnow().isoformat(),
-            "agent_version": self.version,
-            "validation_passed": validation["valid"],
-            "completeness_score": validation["completeness_score"]
-        }
-        
-        # Add processing chain metadata
-        enhanced_schema["processing_chain"] = {
-            "agents_used": ["validation_agent", "classification_agent", "mistral_ocr_agent", "content_analysis_agent", "schema_generation_agent"],
-            "total_processing_time": sum([
-                document_data.get("validation_time", 0.0),
-                document_data.get("classification_time", 0.0),
-                document_data.get("ocr_time", 0.0),
-                document_data.get("analysis_time", 0.0)
-            ])
-        }
-        
-        return enhanced_schema
-    
-    async def _assess_webhook_readiness(self, schema_data: Dict[str, Any], confidence_scores: Dict[str, Any], 
-                                       validation: Dict[str, Any]) -> bool:
-        """Determine if schema is ready for webhook delivery"""
-        
-        # Criteria for webhook readiness
-        criteria = {
-            "validation_passed": validation.get("valid", False),
-            "confidence_threshold": confidence_scores.get("overall", 0.0) >= 0.7,
-            "required_fields_present": validation.get("required_fields_valid", False),
-            "completeness_threshold": validation.get("completeness_score", 0.0) >= 0.6
-        }
-        
-        # Log readiness assessment
-        logger.info(f"Webhook readiness criteria: {criteria}")
-        
-        # All criteria must be met
-        webhook_ready = all(criteria.values())
-        
-        # Update schema with readiness status
-        schema_data["webhook_ready"] = webhook_ready
-        schema_data["readiness_criteria"] = criteria
-        
-        return webhook_ready
-    
-    async def get_schema_template(self, document_type: str) -> Optional[Dict[str, Any]]:
-        """Get schema template for a specific document type"""
-        return self.schema_templates.get(document_type)
-    
-    async def validate_external_schema(self, schema_data: Dict[str, Any], document_type: str) -> Dict[str, Any]:
-        """Validate externally provided schema data"""
-        template = await self._select_base_template(document_type)
-        return await self._validate_schema_data(schema_data, template)
+        return 0.5  # Default confidence

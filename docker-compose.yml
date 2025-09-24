@@ -1,41 +1,139 @@
 version: '3.8'
 
 services:
-  api:
-    build: .
+  # FastAPI Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: document-agent-app
     ports:
       - "8000:8000"
     environment:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - DEBUG=${DEBUG:-false}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/document_agent
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
     volumes:
-      - ./uploads:/tmp/document-uploads
+      - ./uploads:/app/uploads
+      - ./app:/app/app
     depends_on:
       - redis
-    restart: unless-stopped
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - document-network
 
+  # Celery Worker
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: document-agent-celery
+    environment:
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/document_agent
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENVIRONMENT=development
+    volumes:
+      - ./uploads:/app/uploads
+      - ./app:/app/app
+    depends_on:
+      - redis
+      - postgres
+    command: celery -A app.celery_app worker --loglevel=info
+    networks:
+      - document-network
+
+  # Redis
   redis:
     image: redis:7-alpine
+    container_name: document-agent-redis
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
-    restart: unless-stopped
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - document-network
 
-  worker:
-    build: .
-    command: celery -A app.workers worker --loglevel=info
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: document-agent-postgres
     environment:
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - REDIS_URL=redis://redis:6379
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=document_agent
+    ports:
+      - "5432:5432"
     volumes:
-      - ./uploads:/tmp/document-uploads
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - document-network
+
+  # Flower (Celery monitoring) - Optional
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: document-agent-flower
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    ports:
+      - "5555:5555"
     depends_on:
       - redis
-    restart: unless-stopped
+      - celery
+    command: celery -A app.celery_app flower --port=5555
+    networks:
+      - document-network
+
+  # Prometheus (Metrics) - Optional
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: document-agent-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - document-network
+
+  # Grafana (Metrics Dashboard) - Optional
+  grafana:
+    image: grafana/grafana:latest
+    container_name: document-agent-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - document-network
+
+networks:
+  document-network:
+    driver: bridge
 
 volumes:
-  redis_data:
-  uploads:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

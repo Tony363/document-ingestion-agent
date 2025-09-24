@@ -1,44 +1,48 @@
 #!/bin/bash
 
-# Document Ingestion Agent v2.0 - Server Startup Script
+# Document Ingestion Agent - Server Startup Script
 
-echo "================================================"
-echo "Document Ingestion Agent v2.0 - Starting Server"
-echo "================================================"
+echo "Starting Document Ingestion Agent..."
 
-# Check if .env file exists
-if [ ! -f .env ]; then
-    echo "⚠️  No .env file found. Creating from .env.example..."
-    cp .env.example .env
-    echo "📝 Please edit .env file with your Mistral API key"
-    echo "   The server will run in simulation mode without a valid API key"
-    echo ""
+# Check for required environment variables
+if [ -z "$MISTRAL_API_KEY" ]; then
+    echo "Error: MISTRAL_API_KEY environment variable is not set"
+    echo "Please set it using: export MISTRAL_API_KEY='your-api-key'"
+    exit 1
 fi
 
-# Create upload directory if it doesn't exist
-mkdir -p /tmp/document-uploads
+# Create necessary directories
+mkdir -p uploads
+mkdir -p logs
 
-# Install dependencies if not already installed
-if [ ! -d "venv" ]; then
-    echo "📦 Creating virtual environment..."
-    python3 -m venv venv
+# Check if running with Docker
+if [ "$USE_DOCKER" = "true" ]; then
+    echo "Starting with Docker Compose..."
+    docker-compose up --build
+else
+    echo "Starting in local development mode..."
+    
+    # Install dependencies if needed
+    if [ ! -d "venv" ]; then
+        echo "Creating virtual environment..."
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install -r requirements.txt
+    else
+        source venv/bin/activate
+    fi
+    
+    # Start Redis if not running
+    if ! pgrep -x "redis-server" > /dev/null; then
+        echo "Starting Redis..."
+        redis-server --daemonize yes
+    fi
+    
+    # Start Celery worker in background
+    echo "Starting Celery worker..."
+    celery -A app.celery_app worker --loglevel=info --detach
+    
+    # Start FastAPI application
+    echo "Starting FastAPI application..."
+    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 fi
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Install requirements
-echo "📦 Installing dependencies..."
-pip install -q -r requirements.txt
-
-# Run the server
-echo ""
-echo "🚀 Starting FastAPI server..."
-echo "   API Docs: http://localhost:8000/docs"
-echo "   Health Check: http://localhost:8000/health"
-echo ""
-echo "Press Ctrl+C to stop the server"
-echo "================================================"
-
-# Run with uvicorn
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

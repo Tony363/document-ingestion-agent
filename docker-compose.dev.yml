@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # Redis for development
+  redis:
+    image: redis:7-alpine
+    container_name: document-agent-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-dev-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - document-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Celery Worker for development
+  # This runs in Docker but uses local code mounted as volume
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: document-agent-celery-dev
+    environment:
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/document_agent
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./uploads:/app/uploads
+      - ./app:/app/app  # Mount local code for hot reload
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    networks:
+      - document-dev-network
+    restart: unless-stopped
+
+  # Optional: PostgreSQL for development (if needed)
+  # Uncomment if you want to use PostgreSQL instead of SQLite
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: document-agent-postgres-dev
+  #   environment:
+  #     - POSTGRES_USER=postgres
+  #     - POSTGRES_PASSWORD=password
+  #     - POSTGRES_DB=document_agent
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres-dev-data:/var/lib/postgresql/data
+  #   networks:
+  #     - document-dev-network
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 5
+
+  # Optional: Flower for Celery monitoring
+  # Uncomment if you want to monitor Celery tasks
+  # flower:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: document-agent-flower-dev
+  #   environment:
+  #     - CELERY_BROKER_URL=redis://redis:6379/1
+  #     - CELERY_RESULT_BACKEND=redis://redis:6379/2
+  #   ports:
+  #     - "5555:5555"
+  #   depends_on:
+  #     - redis
+  #     - celery
+  #   command: celery -A app.celery_app flower --port=5555
+  #   networks:
+  #     - document-dev-network
+
+networks:
+  document-dev-network:
+    driver: bridge
+
+volumes:
+  redis-dev-data:
+  # postgres-dev-data:  # Uncomment if using PostgreSQL

@@ -64,7 +64,7 @@ graph TB
     subgraph "Data Layer"
         Redis[(Redis Cache<br/>Port 6379<br/>State & Messages)]
         Storage[File Storage<br/>Document Files]
-        Memory[In-Memory Store<br/>Dev Mode)]
+        Memory[In-Memory Store<br/>Dev Mode]
     end
     
     subgraph "External Services"

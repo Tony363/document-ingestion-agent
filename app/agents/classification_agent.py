@@ -48,6 +48,7 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         "invoice": ["invoice", "bill", "statement", "total", "amount due"],
         "receipt": ["receipt", "payment", "transaction", "purchased"],
         "contract": ["agreement", "contract", "terms", "parties", "whereas"],
+        "nda": ["non-disclosure", "nondisclosure", "nda", "confidentiality agreement", "proprietary information", "disclosing party", "receiving party"],
         "form": ["form", "application", "questionnaire", "checkbox"]
     }
     
@@ -189,9 +190,12 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         Returns:
             Document type classification
         """
-        # For now, use file name patterns
-        # In production, this would analyze initial content
+        # Check file name patterns
         file_name_lower = file_path.name.lower()
+        
+        # First check for NDA specifically
+        if "nda" in file_name_lower or "non-disclosure" in file_name_lower or "nondisclosure" in file_name_lower:
+            return "nda"
         
         for doc_type, patterns in self.DOCUMENT_TYPE_PATTERNS.items():
             for pattern in patterns:

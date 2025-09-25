@@ -43,7 +43,6 @@ class DocumentProcessingTask(Task):
             classification_agent = ClassificationAgent()
             ocr_agent = MistralOCRAgent(
                 api_key=settings.mistral_api_key,
-                api_url=settings.mistral_api_url,
                 rate_limit_delay=settings.mistral_rate_limit_delay
             )
             analysis_agent = ContentAnalysisAgent()

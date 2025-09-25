@@ -110,6 +110,28 @@ class SchemaGenerationAgent(BaseAgent[SchemaInput, DocumentSchema]):
                     "endpoint": "/api/forms/submission"
                 }
             ]
+        },
+        "nda": {
+            "required_fields": ["disclosing_party", "receiving_party", "effective_date"],
+            "optional_fields": ["term_duration", "jurisdiction", "purpose", "contact_email", "contact_phone", "signatory"],
+            "triggers": [
+                {
+                    "action": "webhook",
+                    "endpoint": "/api/contracts/nda/new",
+                    "method": "POST"
+                },
+                {
+                    "action": "webhook",
+                    "endpoint": "/api/compliance/confidentiality",
+                    "method": "POST"
+                },
+                {
+                    "action": "webhook",
+                    "condition": {"term_duration": {"$exists": True}},
+                    "endpoint": "/api/contracts/nda/expiration-tracking",
+                    "method": "POST"
+                }
+            ]
         }
     }
     

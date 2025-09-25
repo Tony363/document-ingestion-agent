@@ -1,20 +1,19 @@
 """
 Mistral OCR Agent
 
-Interfaces with Mistral AI's OCR API for text extraction from documents.
-Handles PDF and image processing with retry logic and rate limiting.
+Uses Mistral AI's OCR API for text extraction from documents.
+Handles PDF and image processing with the mistral-ocr-latest model.
 """
 
 import asyncio
-import base64
+import logging
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-import httpx
 from pydantic import BaseModel, Field
 import PyPDF2
-from PIL import Image
-import io
-import logging
+import json
+
+from mistralai import Mistral
 
 from .base_agent import BaseAgent, AgentContext
 from ..config import settings
@@ -47,13 +46,12 @@ class OCROutput(BaseModel):
 
 class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
     """
-    Agent for OCR processing using Mistral AI API
+    Agent for OCR processing using Mistral AI's OCR API
     """
     
     def __init__(
         self,
         api_key: str,
-        api_url: str = "https://api.mistral.ai/v1/ocr",
         max_file_size_mb: int = 10,
         rate_limit_delay: float = 0.1
     ):
@@ -63,16 +61,11 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
             timeout=60.0
         )
         self.api_key = api_key
-        self.api_url = api_url
         self.max_file_size_mb = max_file_size_mb
         self.rate_limit_delay = rate_limit_delay
-        self.client = httpx.AsyncClient(
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
-            timeout=httpx.Timeout(60.0)
-        )
+        
+        # Initialize Mistral client with SDK
+        self.client = Mistral(api_key=api_key)
         
     async def validate_input(self, input_data: OCRInput) -> bool:
         """Validate OCR input"""
@@ -114,49 +107,115 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
         # Resolve full path using environment-aware method
         file_path = Path(settings.get_upload_path()) / input_data.file_path
         
-        # Check if PDF has extractable text first
-        if input_data.mime_type == "application/pdf":
-            extracted_text = await self._extract_pdf_text(file_path)
-            if extracted_text and len(extracted_text.strip()) > 100:
-                # PDF has digital text, skip OCR
-                self.logger.info("PDF has extractable text, skipping OCR")
-                pages = [
-                    OCRPage(
-                        page_number=1,
-                        text=extracted_text,
-                        confidence=1.0,
-                        word_count=len(extracted_text.split())
-                    )
-                ]
-                
-                processing_time = int((time.time() - start_time) * 1000)
-                
-                return OCROutput(
-                    total_pages=1,
-                    processed_pages=1,
-                    full_text=extracted_text,
-                    pages=pages,
-                    average_confidence=1.0,
-                    processing_time_ms=processing_time,
-                    metadata={"method": "pdf_extraction"}
-                )
-        
-        # Process with OCR
+        # Process with Mistral OCR API
         pages = []
         
-        if input_data.mime_type == "application/pdf":
-            # Process PDF pages
-            pages = await self._process_pdf_ocr(file_path, input_data.page_numbers)
-        else:
-            # Process image
-            pages = await self._process_image_ocr(file_path)
+        try:
+            # Call Mistral OCR API
+            self.logger.info(f"Processing document with Mistral OCR: {file_path}")
+            
+            # Use Mistral OCR API with base64 encoding
+            import base64
+            with open(file_path, 'rb') as file:
+                try:
+                    # Convert file to base64 for Mistral API
+                    file_content = file.read()
+                    base64_content = base64.b64encode(file_content).decode('utf-8')
+                    
+                    # Determine MIME type for data URL
+                    mime_type = input_data.mime_type or "application/pdf"
+                    data_url = f"data:{mime_type};base64,{base64_content}"
+                    
+                    # Process the document using Mistral OCR
+                    ocr_response = await asyncio.to_thread(
+                        self.client.ocr.process,
+                        model="mistral-ocr-latest",
+                        document={
+                            "type": "document_url",
+                            "document_url": data_url
+                        },
+                        include_image_base64=False  # We don't need base64 images back
+                    )
+                    
+                    # Extract text and metadata from response
+                    if hasattr(ocr_response, 'text'):
+                        extracted_text = ocr_response.text
+                    elif hasattr(ocr_response, 'content'):
+                        extracted_text = ocr_response.content
+                    elif isinstance(ocr_response, dict):
+                        extracted_text = ocr_response.get('text', '') or ocr_response.get('content', '')
+                    else:
+                        # Try to extract text from string representation
+                        extracted_text = str(ocr_response)
+                    
+                    # Get confidence score if available
+                    confidence = 0.95  # Default high confidence for OCR API
+                    if hasattr(ocr_response, 'confidence'):
+                        confidence = ocr_response.confidence
+                    elif isinstance(ocr_response, dict) and 'confidence' in ocr_response:
+                        confidence = ocr_response['confidence']
+                    
+                    # Check for tables
+                    has_tables = False
+                    if hasattr(ocr_response, 'tables'):
+                        has_tables = len(ocr_response.tables) > 0
+                    elif isinstance(ocr_response, dict) and 'tables' in ocr_response:
+                        has_tables = len(ocr_response.get('tables', [])) > 0
+                    
+                    # Create page result
+                    if extracted_text:
+                        pages.append(OCRPage(
+                            page_number=1,
+                            text=extracted_text,
+                            confidence=confidence,
+                            word_count=len(extracted_text.split()),
+                            has_tables=has_tables,
+                            has_images=input_data.mime_type.startswith("image/")
+                        ))
+                        
+                        self.logger.info(f"Successfully extracted {len(extracted_text)} characters with confidence {confidence}")
+                    else:
+                        self.logger.warning("No text extracted from OCR response")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error calling Mistral OCR API: {e}")
+                    
+                    # Fallback to basic PDF text extraction if available
+                    if input_data.mime_type == "application/pdf":
+                        try:
+                            extracted_text = await self._extract_pdf_text_fallback(file_path)
+                            if extracted_text:
+                                pages.append(OCRPage(
+                                    page_number=1,
+                                    text=extracted_text,
+                                    confidence=0.7,  # Lower confidence for fallback
+                                    word_count=len(extracted_text.split()),
+                                    has_tables=False,
+                                    has_images=False
+                                ))
+                                self.logger.info(f"Fallback: Extracted {len(extracted_text)} characters from PDF")
+                        except Exception as fallback_error:
+                            self.logger.error(f"Fallback extraction also failed: {fallback_error}")
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to process document: {e}")
         
         # Combine results
-        full_text = "\n\n".join([page.text for page in pages])
-        average_confidence = (
-            sum(page.confidence for page in pages) / len(pages)
-            if pages else 0.0
-        )
+        if pages:
+            full_text = "\n\n".join([page.text for page in pages])
+            average_confidence = sum(page.confidence for page in pages) / len(pages)
+        else:
+            # Return empty result if no extraction succeeded
+            full_text = ""
+            average_confidence = 0.0
+            pages = [OCRPage(
+                page_number=1,
+                text="",
+                confidence=0.0,
+                word_count=0,
+                has_tables=False,
+                has_images=False
+            )]
         
         processing_time = int((time.time() - start_time) * 1000)
         
@@ -168,14 +227,15 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
             average_confidence=average_confidence,
             processing_time_ms=processing_time,
             metadata={
-                "method": "mistral_ocr",
-                "document_type": input_data.document_type
+                "method": "mistral_ocr_api",
+                "document_type": input_data.document_type,
+                "model": "mistral-ocr-latest"
             }
         )
     
-    async def _extract_pdf_text(self, file_path: Path) -> Optional[str]:
+    async def _extract_pdf_text_fallback(self, file_path: Path) -> Optional[str]:
         """
-        Extract text from PDF if it's digital (not scanned)
+        Fallback: Extract text from PDF if OCR fails
         
         Args:
             file_path: Path to PDF file
@@ -197,150 +257,5 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
                 return text if text.strip() else None
                 
         except Exception as e:
-            self.logger.warning(f"Failed to extract PDF text: {e}")
+            self.logger.warning(f"Failed to extract PDF text in fallback: {e}")
             return None
-    
-    async def _process_pdf_ocr(
-        self,
-        file_path: Path,
-        page_numbers: Optional[List[int]] = None
-    ) -> List[OCRPage]:
-        """
-        Process PDF with Mistral OCR
-        
-        Args:
-            file_path: Path to PDF file
-            page_numbers: Specific pages to process
-            
-        Returns:
-            List of OCR results per page
-        """
-        pages = []
-        
-        try:
-            with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                total_pages = len(reader.pages)
-                
-                # Determine pages to process
-                if page_numbers:
-                    pages_to_process = [p for p in page_numbers if 0 < p <= total_pages]
-                else:
-                    pages_to_process = range(1, min(total_pages + 1, 10))  # Limit to 10 pages
-                
-                for page_num in pages_to_process:
-                    # Convert PDF page to image
-                    # In production, use pdf2image or similar
-                    # For now, we'll send the PDF directly to Mistral
-                    
-                    # Rate limiting
-                    await asyncio.sleep(self.rate_limit_delay)
-                    
-                    # Process page with Mistral OCR
-                    page_result = await self._call_mistral_ocr(
-                        file_path,
-                        page_number=page_num
-                    )
-                    
-                    if page_result:
-                        pages.append(page_result)
-                        
-        except Exception as e:
-            self.logger.error(f"PDF OCR processing failed: {e}")
-            
-        return pages
-    
-    async def _process_image_ocr(self, file_path: Path) -> List[OCRPage]:
-        """
-        Process image with Mistral OCR
-        
-        Args:
-            file_path: Path to image file
-            
-        Returns:
-            List with single OCR result
-        """
-        page_result = await self._call_mistral_ocr(file_path)
-        return [page_result] if page_result else []
-    
-    async def _call_mistral_ocr(
-        self,
-        file_path: Path,
-        page_number: int = 1
-    ) -> Optional[OCRPage]:
-        """
-        Call Mistral OCR API
-        
-        Args:
-            file_path: Path to file
-            page_number: Page number being processed
-            
-        Returns:
-            OCR result for the page
-        """
-        try:
-            # Read and encode file
-            with open(file_path, 'rb') as file:
-                file_content = file.read()
-                file_base64 = base64.b64encode(file_content).decode('utf-8')
-            
-            # Prepare request payload
-            payload = {
-                "file": file_base64,
-                "file_type": file_path.suffix[1:],  # Remove the dot
-                "ocr_options": {
-                    "language": "en",
-                    "detect_tables": True,
-                    "detect_layout": True
-                }
-            }
-            
-            # Add page specification for PDFs
-            if file_path.suffix.lower() == '.pdf':
-                payload["page_number"] = page_number
-            
-            # Call Mistral OCR API
-            response = await self.client.post(
-                self.api_url,
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                # Extract text and metadata
-                extracted_text = result.get("text", "")
-                confidence = result.get("confidence", 0.0)
-                has_tables = result.get("has_tables", False)
-                has_images = result.get("has_images", False)
-                
-                return OCRPage(
-                    page_number=page_number,
-                    text=extracted_text,
-                    confidence=confidence,
-                    word_count=len(extracted_text.split()),
-                    has_tables=has_tables,
-                    has_images=has_images
-                )
-            
-            elif response.status_code == 429:
-                # Rate limited
-                self.logger.warning("Rate limited by Mistral API")
-                await asyncio.sleep(self.rate_limit_delay * 10)
-                return None
-                
-            else:
-                self.logger.error(f"Mistral OCR API error: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Failed to call Mistral OCR: {e}")
-            return None
-    
-    async def __aenter__(self):
-        """Async context manager entry"""
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - close HTTP client"""
-        await self.client.aclose()

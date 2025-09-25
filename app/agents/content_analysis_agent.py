@@ -47,7 +47,7 @@ class ContentAnalysisAgent(BaseAgent[AnalysisInput, AnalysisOutput]):
     # Common regex patterns for field extraction
     PATTERNS = {
         "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-        "phone": r'[\+]?[(]?[0-9]{1,4}[)]?[-\s\.]?[(]?[0-9]{1,4}[)]?[-\s\.]?[0-9]{1,5}[-\s\.]?[0-9]{1,5}',
+        "phone": r'(?:\+?1[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}',  # Fixed to match actual phone numbers
         "date": r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b',
         "amount": r'\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
         "percentage": r'\d+(?:\.\d+)?%',
@@ -88,8 +88,13 @@ class ContentAnalysisAgent(BaseAgent[AnalysisInput, AnalysisOutput]):
         text = input_data.extracted_text
         document_type = input_data.document_type
         
+        # Check if it's an NDA regardless of classification
+        if self._is_nda(text):
+            fields = await self._extract_nda_fields(text)
+            # Override document type for proper schema generation
+            document_type = "nda"
         # Extract fields based on document type
-        if document_type == "invoice":
+        elif document_type == "invoice":
             fields = await self._extract_invoice_fields(text)
         elif document_type == "receipt":
             fields = await self._extract_receipt_fields(text)
@@ -417,6 +422,173 @@ class ContentAnalysisAgent(BaseAgent[AnalysisInput, AnalysisOutput]):
                 value=phone_matches[0],
                 confidence=0.7
             ))
+        
+        return fields
+    
+    def _is_nda(self, text: str) -> bool:
+        """Check if the document is an NDA based on content"""
+        nda_keywords = [
+            "non-disclosure agreement",
+            "nondisclosure agreement",
+            "confidentiality agreement",
+            "proprietary information agreement",
+            "nda",
+            "disclosing party",
+            "receiving party",
+            "confidential information",
+            "proprietary information"
+        ]
+        text_lower = text.lower()
+        return any(keyword in text_lower for keyword in nda_keywords)
+    
+    async def _extract_nda_fields(self, text: str) -> List[ExtractedField]:
+        """Extract fields specific to NDAs"""
+        fields = []
+        
+        # Extract parties using Company and Recipient pattern specific to the document
+        # Pattern: "between COMPANY_NAME, a STATE corporation ... (\"Company\"), and PERSON_NAME, ... (\"Recipient\")"
+        party_pattern = r'between\s+([^,]+),\s+[^(]+\("Company"\)[^,]+,\s+and\s+([^,]+),\s+[^(]+\("Recipient"\)'
+        party_match = re.search(party_pattern, text, re.IGNORECASE | re.DOTALL)
+        if party_match:
+            fields.append(ExtractedField(
+                name="disclosing_party",
+                value=party_match.group(1).strip(),
+                confidence=0.95
+            ))
+            fields.append(ExtractedField(
+                name="receiving_party",
+                value=party_match.group(2).strip(),
+                confidence=0.95
+            ))
+        else:
+            # Fallback patterns for Company/Disclosing Party
+            company_patterns = [
+                r'(?:\("Company"\)|"Company")[^\n]*?([A-Z][A-Z\s]+(?:INC|LLC|LTD|CORP))',
+                r'by and between\s+([^,]+),',
+                r'DISCLOSING PARTY:\s*([^\n]+)',
+            ]
+            for pattern in company_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    fields.append(ExtractedField(
+                        name="disclosing_party",
+                        value=match.group(1).strip(),
+                        confidence=0.85
+                    ))
+                    break
+            
+            # Fallback patterns for Recipient/Receiving Party
+            recipient_patterns = [
+                r'(?:\("Recipient"\)|"Recipient")[^\n]*?([A-Z][A-Z\s]+)',
+                r',\s+and\s+([^,\n]+),\s+an individual',
+                r'RECEIVING PARTY:\s*([^\n]+)',
+            ]
+            for pattern in recipient_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    fields.append(ExtractedField(
+                        name="receiving_party",
+                        value=match.group(1).strip(),
+                        confidence=0.85
+                    ))
+                    break
+        
+        # Extract Effective Date - improved patterns
+        date_patterns = [
+            r'this\s+(\d+(?:st|nd|rd|th)?\s+day\s+of\s+[A-Za-z]+,?\s+\d{4})',
+            r'(?:"Effective Date"\))[^,]*?(\d+(?:st|nd|rd|th)?\s+day\s+of\s+[A-Za-z]+,?\s+\d{4})',
+            r'AGREEMENT made this\s+([^(]+)\s+\(',
+            r'(?:effective date|dated|date of agreement)[:\s]*([A-Za-z]+ \d{1,2},? \d{4})',
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                fields.append(ExtractedField(
+                    name="effective_date",
+                    value=match.group(1).strip(),
+                    confidence=0.85
+                ))
+                break
+        
+        # Extract Term/Duration
+        term_patterns = [
+            r'(?:term|duration|period)[^\n]*?(\d+\s+(?:year|month|day)s?)',
+            r'(?:expires?|expiration|terminat\w+)[^\n]*?(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            r'for a period of\s+(\d+\s+(?:year|month|day)s?)',
+            r'remain in effect for\s+(\d+\s+(?:year|month|day)s?)',
+        ]
+        for pattern in term_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                fields.append(ExtractedField(
+                    name="term_duration",
+                    value=match.group(1).strip(),
+                    confidence=0.8
+                ))
+                break
+        
+        # Extract Jurisdiction/Governing Law
+        jurisdiction_patterns = [
+            r'(?:governed by|laws of|jurisdiction)[^\n]*?(?:of|in)\s+([A-Za-z\s]+?)(?:\.|,|\n|$)',
+            r'(?:state|laws)\s+of\s+([A-Za-z\s]+?)(?:\.|,|\n|shall|$)',
+        ]
+        for pattern in jurisdiction_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                jurisdiction = match.group(1).strip()
+                # Clean up common endings
+                jurisdiction = re.sub(r'\s+(shall|without|and).*', '', jurisdiction)
+                fields.append(ExtractedField(
+                    name="jurisdiction",
+                    value=jurisdiction,
+                    confidence=0.75
+                ))
+                break
+        
+        # Extract Purpose/Definition of Confidential Information
+        purpose_pattern = r'(?:purpose|for the purpose of|in connection with)[^\n]*?([^\n.]{20,100})'
+        purpose_match = re.search(purpose_pattern, text, re.IGNORECASE)
+        if purpose_match:
+            fields.append(ExtractedField(
+                name="purpose",
+                value=purpose_match.group(1).strip(),
+                confidence=0.7
+            ))
+        
+        # Extract contact information (emails and phones)
+        email_matches = re.findall(self.PATTERNS["email"], text)
+        for i, email in enumerate(email_matches[:2]):  # Limit to 2 emails
+            fields.append(ExtractedField(
+                name=f"contact_email_{i+1}",
+                value=email,
+                confidence=0.95
+            ))
+        
+        phone_matches = re.findall(self.PATTERNS["phone"], text)
+        for i, phone in enumerate(phone_matches[:2]):  # Limit to 2 phones
+            fields.append(ExtractedField(
+                name=f"contact_phone_{i+1}",
+                value=phone,
+                confidence=0.8
+            ))
+        
+        # Extract signature names if present
+        signature_patterns = [
+            r'By:\s*_+\s*([A-Za-z\s]+?)\s*(?:Title|Date|\n)',
+            r'Name:\s*([A-Za-z\s]+?)\s*(?:Title|Date|\n)',
+            r'Signature:\s*_+\s*([A-Za-z\s]+?)\s*(?:Title|Date|\n)',
+        ]
+        signatures_found = []
+        for pattern in signature_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                if match.strip() and match.strip() not in signatures_found:
+                    signatures_found.append(match.strip())
+                    fields.append(ExtractedField(
+                        name=f"signatory_{len(signatures_found)}",
+                        value=match.strip(),
+                        confidence=0.7
+                    ))
         
         return fields
     

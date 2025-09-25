@@ -1,11 +1,11 @@
 # Core Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-pydantic==2.5.0
+pydantic>=2.10.3
 pydantic-settings==2.1.0
 
 # Async HTTP Client
-httpx==0.25.1
+httpx>=0.28.1
 aiofiles==23.2.1
 
 # Document Processing
@@ -13,6 +13,7 @@ python-multipart==0.0.6
 python-magic==0.4.27
 PyPDF2==3.0.1
 pillow==10.1.0
+mistralai>=1.5.0
 
 # Data Validation & Serialization
 jsonschema==4.20.0
@@ -37,7 +38,6 @@ python-json-logger==2.0.7
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
-pytest-httpx==0.26.0
 
 # Development
 python-dotenv==1.0.0

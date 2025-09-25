@@ -21,12 +21,13 @@ An intelligent multi-agent pipeline for processing multi-media documents (PDFs, 
 - **Mistral AI OCR Integration**: Exclusive OCR provider for accurate text extraction with rate limiting
 - **Async Processing**: Non-blocking document processing with Celery background tasks
 - **Webhook Automation**: Automatic webhook triggers upon completion with customizable events
+- **Redis State Management**: Multi-database Redis configuration for state, queuing, and rate limiting
 - **Docker Development**: Hybrid development modes with containerized dependencies
 - **Health Monitoring**: Real-time agent health checks and application metrics
 - **Schema Generation**: Standardized JSON output for automation triggers
-- **Rate Limiting**: Intelligent API protection and throttling
+- **Rate Limiting**: Intelligent API protection and throttling with Redis backend
 - **Retry Logic**: Automatic retry with exponential backoff for fault tolerance
-- **API Authentication**: Secure API key-based authentication
+- **API Authentication**: Secure API key-based authentication with header binding fix
 - **File Validation**: Content type checking, size limits, and deduplication
 
 ## Architecture Overview
@@ -38,48 +39,48 @@ graph TB
     subgraph ClientLayer ["Client Layer"]
         Client[Client Application]
         WebhookConsumer[Webhook Consumer]
-        Docs[API Documentation - Swagger/ReDoc]
+        Docs[API Documentation]
     end
     
     subgraph APILayer ["API Gateway Layer"]
-        FastAPI[FastAPI Server - Port 8000]
-        Auth[API Key Auth - X-API-Key Header]
+        FastAPI[FastAPI Server Port 8000]
+        Auth[API Key Authentication]
         CORS[CORS Middleware]
-        Rate[Rate Limiting]
+        RateLimit[Rate Limiting with Redis DB3]
     end
     
     subgraph ProcessingLayer ["Processing Layer"]
-        Orchestrator[Agent Orchestrator - Pipeline Manager]
-        CeleryWorkers[Celery Workers - Async Task Processing]
-        TaskQueue[Redis Message Broker - DB1: Queue / DB2: Results]
+        Orchestrator[Agent Orchestrator]
+        CeleryWorkers[Celery Workers]
+        TaskQueue[Redis Message Broker]
         
         subgraph AgentPipeline ["5-Agent Pipeline"]
-            CA[Classification Agent - Document Type & Format]
-            OA[Mistral OCR Agent - Text Extraction API]
-            AA[Content Analysis Agent - Pattern-Based Parsing]
-            SA[Schema Generation Agent - JSON Schema Creation]
-            VA[Validation Agent - Business Rules Check]
+            CA[Classification Agent]
+            OA[Mistral OCR Agent]
+            AA[Content Analysis Agent]
+            SA[Schema Generation Agent]
+            VA[Validation Agent]
         end
     end
     
     subgraph DataLayer ["Data Layer"]
-        Redis[(Redis Cache - Port 6379 - State & Messages)]
-        Storage[File Storage - Document Files]
-        Memory[In-Memory Store - Dev Mode]
+        Redis[(Redis Multi-DB)]
+        RedisDB0[DB0 State Management]
+        RedisDB1[DB1 Celery Broker]
+        RedisDB2[DB2 Task Results]
+        RedisDB3[DB3 Rate Limiting]
+        Storage[File Storage]
     end
     
     subgraph ExternalServices ["External Services"]
-        MistralAPI[Mistral AI - OCR API]
-        WebhookURL[Webhook Endpoints - External Systems]
+        MistralAPI[Mistral AI OCR API]
+        WebhookURLs[External Webhook Endpoints]
     end
     
-    Client -->|POST /upload| FastAPI
-    Client -->|GET /status| FastAPI
-    Client -->|GET /schema| FastAPI
-    
+    Client --> FastAPI
     FastAPI --> Auth
     FastAPI --> CORS
-    FastAPI --> Rate
+    FastAPI --> RateLimit
     Auth --> Orchestrator
     
     Orchestrator --> TaskQueue
@@ -87,17 +88,17 @@ graph TB
     CeleryWorkers --> CA
     CA --> OA
     OA --> MistralAPI
-    MistralAPI --> OA
     OA --> AA
     AA --> SA
     SA --> VA
-    VA --> Orchestrator
     
     Orchestrator --> Redis
+    Redis --> RedisDB0
+    Redis --> RedisDB1
+    Redis --> RedisDB2
+    Redis --> RedisDB3
     Orchestrator --> Storage
-    Orchestrator --> WebhookURL
-    
-    FastAPI --> Docs
+    Orchestrator --> WebhookURLs
     
     style FastAPI fill:#4CAF50
     style Orchestrator fill:#2196F3
@@ -105,7 +106,6 @@ graph TB
     style OA fill:#FF9800
     style MistralAPI fill:#FF6B35
     style CeleryWorkers fill:#9C27B0
-    style TaskQueue fill:#FF5722
 ```
 
 ### Pipeline State Flow
@@ -138,18 +138,50 @@ stateDiagram-v2
     FAILED : Error Response
 ```
 
+### Redis State Management Architecture
+
+```mermaid
+graph LR
+    subgraph RedisInstance ["Redis Server Port 6379"]
+        DB0[DB0 - Application State<br/>Document metadata<br/>Pipeline states]
+        DB1[DB1 - Celery Broker<br/>Task queue<br/>Message routing]
+        DB2[DB2 - Task Results<br/>Processing outcomes<br/>Agent responses]
+        DB3[DB3 - Rate Limiting<br/>API throttling<br/>Request counters]
+    end
+    
+    subgraph Applications ["Application Layer"]
+        FastAPI[FastAPI Server]
+        CeleryWorker[Celery Workers]
+        StateManager[State Manager Service]
+    end
+    
+    FastAPI --> DB0
+    FastAPI --> DB3
+    CeleryWorker --> DB1
+    CeleryWorker --> DB2
+    StateManager --> DB0
+    
+    style DB0 fill:#E3F2FD
+    style DB1 fill:#FFF3E0
+    style DB2 fill:#E8F5E8
+    style DB3 fill:#FCE4EC
+    style FastAPI fill:#4CAF50
+    style CeleryWorker fill:#9C27B0
+    style StateManager fill:#2196F3
+```
+
 ### Development Workflow
 
 ```mermaid
 flowchart LR
     subgraph LocalDev ["Local Development"]
         Code[Source Code]
-        App[FastAPI App - localhost:8000]
+        App[FastAPI App localhost:8000]
         Tests[pytest Tests]
     end
     
     subgraph DockerDeps ["Docker Dependencies"]
-        Redis[Redis Container - Port 6379]
+        Redis[Redis Container Port 6379]
         CeleryWorker[Celery Worker Container]
     end
     
@@ -201,8 +233,14 @@ MISTRAL_API_KEY=your_mistral_api_key_here
 API_HOST=0.0.0.0
 API_PORT=8000
 REDIS_HOST=localhost
-# DATABASE_URL is optional - Redis is used for state management by default
+REDIS_PORT=6379
+
+# Database Configuration (Optional - Redis is used for state management by default)
 # DATABASE_URL=postgresql://user:password@localhost/dbname
+
+# Rate Limiting (Optional)
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REDIS_DB=3
 ```
 
 ### 3. Quick Start Options
@@ -298,7 +336,7 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
 
 **Endpoint**: `GET /api/v1/documents/{document_id}/status`
 
-Check processing status and pipeline progress for a document.
+Check processing status and pipeline progress for a document using Celery task tracking.
 
 **Request**:
 ```bash
@@ -307,7 +345,26 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/status" \
   -H "Accept: application/json"
 ```
 
-**Response** (200 OK):
+**Response** (200 OK) - Processing:
+```json
+{
+  "document_id": "doc-uuid-here",
+  "status": "processing",
+  "file_name": "invoice.pdf",
+  "uploaded_at": "2024-01-15T10:30:00Z",
+  "celery_status": "PROGRESS",
+  "pipeline_state": {
+    "stage": "ocr",
+    "started_at": "2024-01-15T10:30:01Z",
+    "updated_at": "2024-01-15T10:31:45Z",
+    "progress": "Extracting text from document...",
+    "error": null
+  },
+  "error": null
+}
+```
+
+**Response** (200 OK) - Completed:
 ```json
 {
   "document_id": "doc-uuid-here",
@@ -315,6 +372,7 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/status" \
   "file_name": "invoice.pdf",
   "uploaded_at": "2024-01-15T10:30:00Z",
   "completed_at": "2024-01-15T10:32:15Z",
+  "celery_status": "SUCCESS",
   "pipeline_state": {
     "stage": "completed",
     "started_at": "2024-01-15T10:30:01Z",
@@ -322,23 +380,31 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/status" \
     "completed_at": "2024-01-15T10:32:15Z",
     "error": null
   },
+  "processing_time_seconds": 135.2,
   "error": null
 }
 ```
 
 **Status Values**:
-- `processing`: Document uploaded, pipeline running
+- `processing`: Document uploaded, Celery task running
 - `completed`: Successfully processed through all agents
 - `failed`: Error occurred during processing
 
+**Celery Status Values**:
+- `PENDING`: Task not yet started or unknown
+- `PROGRESS`: Task is currently running
+- `SUCCESS`: Task completed successfully
+- `FAILURE`: Task failed with error
+- `RETRY`: Task is being retried after failure
+
 **Pipeline Stages**:
 - `RECEIVED`: Document uploaded and queued
-- `CLASSIFICATION`: Identifying document type
-- `OCR`: Extracting text via Mistral AI
-- `ANALYSIS`: Parsing fields and content
-- `SCHEMA_GENERATION`: Creating JSON schema
-- `VALIDATION`: Business rules validation
-- `COMPLETED`: Ready for retrieval
+- `CLASSIFICATION`: Identifying document type and format
+- `OCR`: Extracting text via Mistral AI OCR API
+- `ANALYSIS`: Parsing fields and extracting structured data
+- `SCHEMA_GENERATION`: Creating standardized JSON schema
+- `VALIDATION`: Business rules validation and quality checks
+- `COMPLETED`: Ready for retrieval and webhook delivery
 
 ### 3. Get Generated Schema
 
@@ -402,21 +468,9 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/schema" \
 
 Register a webhook URL to receive automatic notifications when documents are processed.
 
-**Note**: Current implementation uses query parameters instead of JSON body.
+**Rate Limits**: 10 requests per minute per IP (when rate limiting enabled)
 
-**Request**:
-```bash
-curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://your-app.com/webhooks/document-processed&webhook_name=Production%20Document%20Handler&events=document.processed&events=document.failed" \
-  -H "X-API-Key: your-api-key"
-```
-
-**Minimal request**:
-```bash
-curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://webhook.site/unique-url&webhook_name=Test%20Webhook" \
-  -H "X-API-Key: dev-key-123"
-```
-
-**Using JSON body (alternative format)**:
+**Request with JSON body (recommended)**:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
   -H "X-API-Key: dev-key-123" \
@@ -425,6 +479,24 @@ curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
     "webhook_url": "https://webhook.site/unique-url",
     "webhook_name": "Test Webhook",
     "events": ["document.processed"]
+  }'
+```
+
+**Request with query parameters (alternative)**:
+```bash
+curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://webhook.site/unique-url&webhook_name=Test%20Webhook&events=document.processed" \
+  -H "X-API-Key: dev-key-123"
+```
+
+**Full example with multiple events**:
+```bash
+curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "https://your-app.com/webhooks/document-processed",
+    "webhook_name": "Production Document Handler",
+    "events": ["document.processed", "document.failed"]
   }'
 ```
 
@@ -591,16 +663,25 @@ curl -X DELETE "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
 
 System health check with agent status and application information. **No authentication required**.
 
-**Request**:
+**Basic health check**:
 ```bash
 curl -X GET "http://localhost:8000/health" \
   -H "Accept: application/json"
 ```
 
-**Request with verbose health info**:
+**Verbose health check with detailed information**:
 ```bash
 curl -X GET "http://localhost:8000/health?verbose=true" \
   -H "Accept: application/json"
+```
+
+**Check specific components**:
+```bash
+# Check Redis connectivity
+curl -X GET "http://localhost:8000/health?verbose=true&check_redis=true"
+
+# Check Celery workers
+curl -X GET "http://localhost:8000/health?verbose=true&check_celery=true"
 ```
 
 **Response** (200 OK):
@@ -618,7 +699,8 @@ curl -X GET "http://localhost:8000/health?verbose=true" \
     "ocr": {
       "status": "healthy",
       "last_check": "2024-01-15T10:45:29Z",
-      "api_status": "connected"
+      "api_status": "connected",
+      "rate_limit_status": "ok"
     },
     "analysis": {
       "status": "healthy",
@@ -631,6 +713,29 @@ curl -X GET "http://localhost:8000/health?verbose=true" \
     "validation": {
       "status": "healthy",
       "last_check": "2024-01-15T10:45:29Z"
+    }
+  },
+  "infrastructure": {
+    "redis": {
+      "status": "healthy",
+      "databases": {
+        "db0": "connected",
+        "db1": "connected", 
+        "db2": "connected",
+        "db3": "connected"
+      },
+      "memory_usage": "2.1MB"
+    },
+    "celery": {
+      "status": "healthy",
+      "active_workers": 2,
+      "queued_tasks": 0,
+      "failed_tasks": 0
+    },
+    "rate_limiter": {
+      "status": "enabled",
+      "requests_per_minute": 45,
+      "blocked_requests": 0
     }
   }
 }
@@ -841,22 +946,37 @@ API_PREFIX=/api/v1
 ENABLE_API_KEY_AUTH=true
 API_KEYS=dev-key-123,prod-key-456
 
-# Redis Configuration
+# Redis Configuration (Multi-Database Setup)
 REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_DB=0
+REDIS_DB=0                    # Default database for general state
+REDIS_PASSWORD=               # Optional Redis password
 
-# Database (Optional - uses Redis for state management by default)
+# Celery Configuration (uses Redis DB1 and DB2)
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_RESULT_BACKEND=redis://localhost:6379/2
+CELERY_TASK_TIME_LIMIT=300
+CELERY_TASK_SOFT_TIME_LIMIT=270
+
+# Rate Limiting (uses Redis DB3)
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REDIS_DB=3
+RATE_LIMIT_DEFAULT_LIMITS=200 per minute,1000 per hour
+
+# Database (Optional - Redis is now primary state management)
 # DATABASE_URL=postgresql://user:password@localhost/document_agent
 
 # File Processing
 MAX_UPLOAD_SIZE_MB=10
 ALLOWED_EXTENSIONS=.pdf,.png,.jpg,.jpeg,.tiff,.bmp
 UPLOAD_DIRECTORY=./uploads
+MAX_CONCURRENT_DOCUMENTS=5
+PROCESSING_TIMEOUT=300
 
 # Mistral AI Configuration
 MISTRAL_API_URL=https://api.mistral.ai/v1/chat/completions
 MISTRAL_RATE_LIMIT_DELAY=1.0
+OCR_CONFIDENCE_THRESHOLD=0.7
 
 # Webhook Configuration
 WEBHOOK_TIMEOUT_SECONDS=30
@@ -870,6 +990,11 @@ DEBUG=true
 
 # CORS (comma-separated)
 CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+
+# Security
+ENABLE_NATIVE_PDF_DETECTION=true
+VALIDATION_STRICT_MODE=true
+MAX_PAGES_PER_DOCUMENT=10
 ```
 
 ### Development Commands
@@ -1683,7 +1808,65 @@ redis:
   command: redis-server --save "" --appendonly no  # Disable persistence
 ```
 
-#### 7. Webhook Delivery Issues
+#### 7. Rate Limiting Issues
+
+**Symptoms**:
+- "Rate limit exceeded" error responses
+- 429 Too Many Requests status
+- Slowapi connection errors
+
+**Solutions**:
+```bash
+# Check rate limiting status
+curl -X GET "http://localhost:8000/health?verbose=true" | jq '.infrastructure.rate_limiter'
+
+# Verify Redis DB3 connectivity
+redis-cli -n 3 ping
+
+# Check current rate limit counters
+redis-cli -n 3 KEYS "*"
+
+# Disable rate limiting temporarily
+export RATE_LIMIT_ENABLED=false
+
+# Adjust rate limits
+export RATE_LIMIT_DEFAULT_LIMITS="500 per minute,5000 per hour"
+```
+
+#### 8. Redis Multi-Database Issues
+
+**Symptoms**:
+- State not persisting across requests
+- Celery tasks not processing
+- Rate limiting not working
+
+**Solutions**:
+```bash
+# Check all Redis databases
+for db in {0..3}; do
+  echo "DB$db:"
+  redis-cli -n $db info keyspace
+done
+
+# Verify database connections
+python -c "
+import redis
+for db in range(4):
+    try:
+        r = redis.Redis(host='localhost', port=6379, db=db)
+        print(f'DB{db}: {r.ping()}')
+    except Exception as e:
+        print(f'DB{db}: ERROR - {e}')
+"
+
+# Clear specific database if corrupted
+redis-cli -n 3 FLUSHDB  # Clear rate limiting data
+
+# Monitor Redis commands
+redis-cli monitor
+```
+
+#### 9. Webhook Delivery Issues
 
 **Symptoms**:
 - Webhooks not triggering
@@ -1785,12 +1968,16 @@ curl -H "X-API-Key: dev-key-123" \
 
 **Monitoring Checklist**:
 - [ ] Health endpoint responding (`/health`)
-- [ ] Redis connectivity working
-- [ ] Mistral API accessible
+- [ ] Redis multi-database connectivity (DB0-DB3)
+- [ ] Celery workers running and processing tasks
+- [ ] Rate limiting functioning properly
+- [ ] Mistral API accessible and within rate limits
 - [ ] File upload directory writable
-- [ ] Webhook endpoints reachable
+- [ ] Webhook endpoints reachable and responding
 - [ ] Agent processing times within limits
 - [ ] Memory usage under thresholds
+- [ ] State persistence across API calls
+- [ ] Background task queue processing
 
 **Backup Strategy**:
 - Document uploads: Regular filesystem backups
@@ -1894,19 +2081,65 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
 
 ### Recent Changes (September 2025)
 
+#### Latest Implementation Updates
+
+**1. Redis State Management System**
+- **New File**: `app/services/state_manager.py` - Comprehensive Redis-based state management
+- **Multi-Database Architecture**: Separate Redis databases for different purposes:
+  - DB0: Application state and document metadata
+  - DB1: Celery message broker and task queue
+  - DB2: Task results and processing outcomes
+  - DB3: Rate limiting counters and API throttling
+- **Shared State**: Cross-process communication between FastAPI and Celery workers
+- **TTL Management**: Automatic expiration of documents (24h) and job states (1h)
+
+**2. Webhook JSON Body Support**
+- **New File**: `app/models/webhook_models.py` - Pydantic models for webhook handling
+- **Enhanced Registration**: Support for both JSON body and query parameter formats
+- **Model Validation**: Structured webhook registration, updates, and responses
+- **Event Subscriptions**: Flexible event filtering for webhook deliveries
+
+**3. Rate Limiting with slowapi**
+- **Integration**: Added slowapi for Redis-backed rate limiting
+- **Configuration**: 200 requests/minute, 1000/hour default limits
+- **Redis Backend**: Uses Redis DB3 for distributed rate limiting
+- **Per-IP Throttling**: Automatic IP-based request throttling and blocking
+
+**4. Celery Status Integration**
+- **AsyncResult Tracking**: Real-time Celery task status in API responses
+- **Enhanced Status Endpoint**: Now includes Celery task states (PENDING, PROGRESS, SUCCESS, FAILURE)
+- **Progress Tracking**: Detailed pipeline stage progression with timestamps
+- **Error Handling**: Improved error reporting with task failure details
+
+**5. API Authentication Fix**
+- **Header Binding**: Fixed X-API-Key header dependency injection
+- **Consistent Auth**: Proper authentication across all protected endpoints
+- **Error Responses**: Clear 401 Unauthorized responses for invalid keys
+
+**6. Verbose Health Check**
+- **Detailed Monitoring**: Added verbose parameter for comprehensive health information
+- **Infrastructure Status**: Redis multi-database connectivity checks
+- **Celery Health**: Worker status, queue length, and failure counts
+- **Rate Limiter Status**: Current request rates and blocked request counters
+
+**7. Configuration Enhancements**
+- **DATABASE_URL Optional**: Redis now primary state management, PostgreSQL optional
+- **Environment Variables**: New Redis-specific configuration options
+- **Rate Limiting Config**: Configurable rate limits and Redis database selection
+
 #### Mermaid Diagram Fixes & Documentation Enhancements
 1. **Fixed Mermaid Syntax Issues**: Resolved "Could not find a suitable point for the given distance" errors
    - Fixed complex node labels with line breaks causing rendering failures
    - Simplified connection syntax in system architecture diagram
    - Updated pipeline state flow diagram with cleaner state definitions
-   - Enhanced development workflow diagram with proper subgraph naming
+   - Added new Redis State Management Architecture diagram
 
 2. **Comprehensive API Documentation**: Complete curl examples for all 9 endpoints
    - Added detailed error response examples for every endpoint
-   - Corrected webhook registration endpoint to show query parameter usage
-   - Added comprehensive metrics endpoint documentation with field explanations
-   - Included authentication requirements clearly marked for each endpoint
-   - Added alternative JSON body formats where applicable
+   - Updated webhook registration to show JSON body as recommended approach
+   - Enhanced status endpoint documentation with Celery integration
+   - Added rate limiting information to relevant endpoints
+   - Included verbose health check examples with infrastructure monitoring
 
 #### Current Implementation Status
 3. **Celery Task Queue System**: Fully implemented with Redis message broker
@@ -1966,12 +2199,22 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
 - **Python 3.11+**: Modern async features and performance improvements
 - **FastAPI**: High-performance async web framework with automatic OpenAPI documentation
 - **Celery 5.4.0**: Distributed task queue with Redis broker and result backend
-- **Redis 7**: Multi-purpose data store (message broker, results, caching)
+- **Redis 7**: Multi-database data store (state management, message broker, results, rate limiting)
+- **Pydantic V2**: Data validation, serialization, and configuration management with Settings
 
 **AI & Processing**:
 - **Mistral AI**: Exclusive OCR provider with intelligent rate limiting and retry logic
 - **httpx**: Async HTTP client for external API calls and webhook delivery
-- **Pydantic V2**: Data validation, serialization, and configuration management
+
+**State Management & Caching**:
+- **Redis Multi-Database**: Separated concerns across DB0-DB3
+- **State Manager Service**: Cross-process communication between FastAPI and Celery
+- **TTL Management**: Automatic expiration of temporary data
+
+**API & Security**:
+- **slowapi**: Redis-backed rate limiting and API throttling
+- **CORS Middleware**: Cross-origin resource sharing configuration
+- **API Key Authentication**: Header-based authentication with dependency injection
 
 **Infrastructure**:
 - **Docker & Docker Compose**: Multi-environment containerization and orchestration
@@ -1980,28 +2223,59 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
 
 **Development & Testing**:
 - **pytest**: Testing framework with async support and coverage reporting
+- **pytest-asyncio**: Async test support for pipeline testing
+- **pytest-httpx**: HTTP client mocking for API tests
 - **mypy**: Static type checking for code quality
 - **black**: Code formatting and style enforcement
 - **ruff**: Fast Python linter for code quality checks
 
+**Monitoring & Logging**:
+- **prometheus-client**: Metrics collection and monitoring
+- **python-json-logger**: Structured logging for better debugging
+
 ---
 
 **Project Status**: Production Ready ✅  
-**Last Updated**: September 2025  
+**Last Updated**: September 2025 (Latest Implementation Updates)  
 **Version**: 1.0.0  
 **License**: MIT  
 
+**Latest Architecture Features**:
+- ✅ Redis Multi-Database State Management (DB0-DB3)
+- ✅ Rate Limiting with slowapi and Redis Backend
+- ✅ Webhook JSON Body Support with Pydantic Models
+- ✅ Celery AsyncResult Status Tracking Integration
+- ✅ Verbose Health Check with Infrastructure Monitoring
+- ✅ Fixed Mermaid Diagrams and Enhanced Documentation
+
 **Quick Start Commands**:
 ```bash
-# Start development environment
+# Start development environment with Redis multi-database
 docker-compose -f docker-compose.dev.yml up -d
+
+# Run server with rate limiting and state management
 ./run_server.sh
 
-# Test the pipeline
+# Test the complete pipeline with new features
 python test_pipeline.py
 
-# Check API documentation
+# Check comprehensive API documentation
 open http://localhost:8000/api/v1/docs
+
+# Monitor health with verbose infrastructure status
+curl "http://localhost:8000/health?verbose=true"
+
+# Test rate limiting and webhook registration
+curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url": "https://webhook.site/test", "webhook_name": "Test"}'
 ```
+
+**File Structure Summary**:
+- `app/services/state_manager.py` - Redis state management service
+- `app/models/webhook_models.py` - Webhook Pydantic models  
+- `app/main.py` - Updated with rate limiting and AsyncResult integration
+- `app/config.py` - Enhanced configuration with Redis multi-database support
+- `requirements.txt` - Added slowapi for rate limiting
 
 For issues, feature requests, or contributions, please refer to the project repository.

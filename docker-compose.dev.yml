@@ -9,7 +9,9 @@ services:
       - "6379:6379"
     volumes:
       - redis-dev-data:/data
-    command: redis-server --appendonly yes
+    # Note: Redis memory overcommit warning is informational in Docker
+    # To fix on host: sudo sysctl vm.overcommit_memory=1
+    command: redis-server --appendonly yes --save 60 1 --loglevel warning
     networks:
       - document-dev-network
     healthcheck:

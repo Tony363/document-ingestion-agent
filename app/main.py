@@ -5,7 +5,7 @@ Entry point for the document processing API with endpoints for
 document upload, status checking, and webhook management.
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Any
@@ -17,6 +17,7 @@ import logging
 from datetime import datetime
 
 from .config import settings
+from .tasks import process_document_task, trigger_webhooks_task
 from .agents import (
     AgentOrchestrator,
     ClassificationAgent,
@@ -108,7 +109,6 @@ async def verify_api_key(x_api_key: Optional[str] = None):
 
 @app.post(f"{settings.api_prefix}/documents/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     authorized: bool = Depends(verify_api_key)
 ):
@@ -180,12 +180,14 @@ async def upload_document(
         content_hash=content_hash
     )
     
-    # Process document in background
-    background_tasks.add_task(
-        process_document_task,
-        document,
-        context
+    # Queue document processing with Celery
+    task = process_document_task.delay(
+        document.dict(),
+        context.dict()
     )
+    
+    # Store task ID for tracking
+    document_metadata[document_id]["celery_task_id"] = task.id
     
     return JSONResponse(
         status_code=202,
@@ -197,33 +199,8 @@ async def upload_document(
         }
     )
 
-async def process_document_task(document: DocumentData, context: AgentContext):
-    """Background task to process document through pipeline"""
-    try:
-        # Execute pipeline
-        state = await orchestrator.execute_pipeline(document, context)
-        
-        # Store final state
-        job_states[context.job_id] = state
-        
-        # Update document metadata
-        if context.document_id in document_metadata:
-            document_metadata[context.document_id]["status"] = "completed"
-            document_metadata[context.document_id]["completed_at"] = datetime.utcnow().isoformat()
-        
-        # Trigger webhooks if validation passed
-        if state.stage == "completed":
-            validation_result = state.agent_results.get("validation", {})
-            if validation_result and validation_result.data and validation_result.data.is_valid:
-                schema_result = state.agent_results.get("schema", {})
-                if schema_result and schema_result.data:
-                    await trigger_webhooks(schema_result.data)
-        
-    except Exception as e:
-        logger.error(f"Pipeline processing failed for job {context.job_id}: {e}")
-        if context.document_id in document_metadata:
-            document_metadata[context.document_id]["status"] = "failed"
-            document_metadata[context.document_id]["error"] = str(e)
+# Note: The process_document_task function has been moved to app/tasks.py
+# and is now a Celery task that will be executed asynchronously by workers
 
 @app.get(f"{settings.api_prefix}/documents/{{document_id}}/status")
 async def get_document_status(
@@ -400,30 +377,8 @@ async def get_metrics(authorized: bool = Depends(verify_api_key)):
         "active_jobs": len(job_states)
     }
 
-# Utility function for webhook triggering
-async def trigger_webhooks(schema_data):
-    """Trigger registered webhooks with document schema"""
-    import httpx
-    
-    for webhook in webhooks.values():
-        if not webhook.get("active"):
-            continue
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    webhook["url"],
-                    json=schema_data.dict() if hasattr(schema_data, 'dict') else schema_data,
-                    timeout=settings.webhook_timeout_seconds
-                )
-                
-                if response.status_code >= 200 and response.status_code < 300:
-                    logger.info(f"Webhook {webhook['id']} triggered successfully")
-                else:
-                    logger.error(f"Webhook {webhook['id']} failed with status {response.status_code}")
-                    
-        except Exception as e:
-            logger.error(f"Failed to trigger webhook {webhook['id']}: {e}")
+# Note: Webhook triggering is now handled by the Celery task trigger_webhooks_task
+# in app/tasks.py for better scalability and error handling
 
 if __name__ == "__main__":
     import uvicorn

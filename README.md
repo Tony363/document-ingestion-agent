@@ -35,41 +35,42 @@ An intelligent multi-agent pipeline for processing multi-media documents (PDFs, 
 
 ```mermaid
 graph TB
-    subgraph "Client Layer"
+    subgraph ClientLayer ["Client Layer"]
         Client[Client Application]
-        Webhook[Webhook Consumer]
-        Docs[API Documentation<br/>Swagger/ReDoc]
+        WebhookConsumer[Webhook Consumer]
+        Docs[API Documentation - Swagger/ReDoc]
     end
     
-    subgraph "API Gateway Layer"
-        FastAPI[FastAPI Server<br/>Port 8000]
-        Auth[API Key Auth<br/>X-API-Key Header]
+    subgraph APILayer ["API Gateway Layer"]
+        FastAPI[FastAPI Server - Port 8000]
+        Auth[API Key Auth - X-API-Key Header]
         CORS[CORS Middleware]
         Rate[Rate Limiting]
     end
     
-    subgraph "Processing Layer"
-        Orchestrator[Agent Orchestrator<br/>Pipeline Manager]
-        BG[Background Tasks<br/>Celery Workers]
+    subgraph ProcessingLayer ["Processing Layer"]
+        Orchestrator[Agent Orchestrator - Pipeline Manager]
+        CeleryWorkers[Celery Workers - Async Task Processing]
+        TaskQueue[Redis Message Broker - DB1: Queue / DB2: Results]
         
-        subgraph "5-Agent Pipeline"
-            CA[Classification Agent<br/>Document Type & Format]
-            OA[Mistral OCR Agent<br/>Text Extraction API]
-            AA[Content Analysis Agent<br/>Pattern-Based Parsing]
-            SA[Schema Generation Agent<br/>JSON Schema Creation]
-            VA[Validation Agent<br/>Business Rules Check]
+        subgraph AgentPipeline ["5-Agent Pipeline"]
+            CA[Classification Agent - Document Type & Format]
+            OA[Mistral OCR Agent - Text Extraction API]
+            AA[Content Analysis Agent - Pattern-Based Parsing]
+            SA[Schema Generation Agent - JSON Schema Creation]
+            VA[Validation Agent - Business Rules Check]
         end
     end
     
-    subgraph "Data Layer"
-        Redis[(Redis Cache<br/>Port 6379<br/>State & Messages)]
-        Storage[File Storage<br/>Document Files]
-        Memory[In-Memory Store<br/>Dev Mode]
+    subgraph DataLayer ["Data Layer"]
+        Redis[(Redis Cache - Port 6379 - State & Messages)]
+        Storage[File Storage - Document Files]
+        Memory[In-Memory Store - Dev Mode]
     end
     
-    subgraph "External Services"
-        MistralAPI[Mistral AI<br/>OCR API]
-        WebhookURL[Webhook Endpoints<br/>External Systems]
+    subgraph ExternalServices ["External Services"]
+        MistralAPI[Mistral AI - OCR API]
+        WebhookURL[Webhook Endpoints - External Systems]
     end
     
     Client -->|POST /upload| FastAPI
@@ -81,19 +82,20 @@ graph TB
     FastAPI --> Rate
     Auth --> Orchestrator
     
-    Orchestrator --> BG
-    BG --> CA
-    CA -->|Document Type| OA
-    OA -->|HTTP Request| MistralAPI
-    MistralAPI -->|Extracted Text| OA
+    Orchestrator --> TaskQueue
+    TaskQueue --> CeleryWorkers
+    CeleryWorkers --> CA
+    CA --> OA
+    OA --> MistralAPI
+    MistralAPI --> OA
     OA --> AA
-    AA -->|Parsed Fields| SA
-    SA -->|JSON Schema| VA
-    VA -->|Validated Data| Orchestrator
+    AA --> SA
+    SA --> VA
+    VA --> Orchestrator
     
     Orchestrator --> Redis
     Orchestrator --> Storage
-    Orchestrator -->|Trigger Webhook| WebhookURL
+    Orchestrator --> WebhookURL
     
     FastAPI --> Docs
     
@@ -102,64 +104,70 @@ graph TB
     style Redis fill:#DC382D
     style OA fill:#FF9800
     style MistralAPI fill:#FF6B35
-    style BG fill:#9C27B0
+    style CeleryWorkers fill:#9C27B0
+    style TaskQueue fill:#FF5722
 ```
 
 ### Pipeline State Flow
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RECEIVED: Document Upload<br/>POST /upload
-    RECEIVED --> CLASSIFICATION: Background Task Started
-    CLASSIFICATION --> OCR: Document Type Identified
-    OCR --> ANALYSIS: Mistral AI Text Extraction
-    ANALYSIS --> SCHEMA_GENERATION: Fields Extracted & Parsed
-    SCHEMA_GENERATION --> VALIDATION: JSON Schema Generated
-    VALIDATION --> COMPLETED: Business Rules Passed
-    VALIDATION --> FAILED: Validation Error
-    COMPLETED --> [*]: Webhook Triggered
-    FAILED --> [*]: Error Response
+    [*] --> RECEIVED
+    RECEIVED --> CLASSIFICATION
+    CLASSIFICATION --> OCR
+    OCR --> ANALYSIS
+    ANALYSIS --> SCHEMA_GENERATION
+    SCHEMA_GENERATION --> VALIDATION
+    VALIDATION --> COMPLETED
+    VALIDATION --> FAILED
+    COMPLETED --> [*]
+    FAILED --> [*]
     
-    CLASSIFICATION --> FAILED: Invalid Format
-    OCR --> FAILED: OCR API Error
-    ANALYSIS --> FAILED: Parsing Error
-    SCHEMA_GENERATION --> FAILED: Schema Error
+    CLASSIFICATION --> FAILED
+    OCR --> FAILED
+    ANALYSIS --> FAILED
+    SCHEMA_GENERATION --> FAILED
     
-    note right of OCR: Rate Limited<br/>Retry with Backoff
-    note right of VALIDATION: Configurable Rules<br/>Data Quality Check
-    note right of COMPLETED: Automatic Webhook<br/>JSON Payload
+    RECEIVED : Document Upload POST /upload
+    CLASSIFICATION : Document Type Identification
+    OCR : Mistral AI Text Extraction
+    ANALYSIS : Fields Extracted & Parsed
+    SCHEMA_GENERATION : JSON Schema Generated
+    VALIDATION : Business Rules Check
+    COMPLETED : Webhook Triggered
+    FAILED : Error Response
 ```
 
 ### Development Workflow
 
 ```mermaid
 flowchart LR
-    subgraph "Local Development"
+    subgraph LocalDev ["Local Development"]
         Code[Source Code]
-        App[FastAPI App<br/>localhost:8000]
+        App[FastAPI App - localhost:8000]
         Tests[pytest Tests]
     end
     
-    subgraph "Docker Dependencies"
-        Redis[Redis Container<br/>Port 6379]
-        Celery[Celery Worker<br/>Container]
+    subgraph DockerDeps ["Docker Dependencies"]
+        Redis[Redis Container - Port 6379]
+        CeleryWorker[Celery Worker Container]
     end
     
-    subgraph "External Services"
+    subgraph ExtServices ["External Services"]
         Mistral[Mistral AI API]
         Webhooks[Test Webhooks]
     end
     
     Code --> App
     App --> Redis
-    App --> Celery
+    App --> CeleryWorker
     App --> Mistral
     App --> Webhooks
     Tests --> App
     
     style App fill:#4CAF50
     style Redis fill:#DC382D
-    style Celery fill:#9C27B0
+    style CeleryWorker fill:#9C27B0
 ```
 
 ## Quick Start
@@ -390,26 +398,29 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/schema" \
 
 Register a webhook URL to receive automatic notifications when documents are processed.
 
+**Note**: Current implementation uses query parameters instead of JSON body.
+
 **Request**:
 ```bash
-curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhook_url": "https://your-app.com/webhooks/document-processed",
-    "webhook_name": "Production Document Handler",
-    "events": ["document.processed", "document.failed"]
-  }'
+curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://your-app.com/webhooks/document-processed&webhook_name=Production%20Document%20Handler&events=document.processed&events=document.failed" \
+  -H "X-API-Key: your-api-key"
 ```
 
 **Minimal request**:
+```bash
+curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://webhook.site/unique-url&webhook_name=Test%20Webhook" \
+  -H "X-API-Key: dev-key-123"
+```
+
+**Using JSON body (alternative format)**:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
   -H "X-API-Key: dev-key-123" \
   -H "Content-Type: application/json" \
   -d '{
     "webhook_url": "https://webhook.site/unique-url",
-    "webhook_name": "Test Webhook"
+    "webhook_name": "Test Webhook",
+    "events": ["document.processed"]
   }'
 ```
 
@@ -418,6 +429,25 @@ curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
 {
   "webhook_id": "webhook-uuid-here",
   "message": "Webhook registered successfully"
+}
+```
+
+**Error Responses**:
+```json
+// Invalid API key (401)
+{
+  "detail": "Invalid API key"
+}
+
+// Missing webhook_url (422)
+{
+  "detail": [
+    {
+      "loc": ["query", "webhook_url"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
 }
 ```
 
@@ -430,8 +460,8 @@ curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
   "job_id": "job-uuid-here",
   "schema": {
     "document_type": "invoice",
-    "extracted_fields": { ... },
-    "validation_results": { ... }
+    "extracted_fields": { "..." },
+    "validation_results": { "..." }
   }
 }
 ```
@@ -480,23 +510,35 @@ curl -X GET "http://localhost:8000/api/v1/webhooks/list" \
 
 Update webhook configuration including URL and active status.
 
+**Note**: Current implementation uses query parameters instead of JSON body.
+
 **Request**:
 ```bash
-curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhook_url": "https://new-endpoint.yourapp.com/webhook",
-    "active": false
-  }'
+curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here?webhook_url=https://new-endpoint.yourapp.com/webhook&active=false" \
+  -H "X-API-Key: your-api-key"
 ```
 
 **Disable webhook only**:
 ```bash
+curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here?active=false" \
+  -H "X-API-Key: dev-key-123"
+```
+
+**Update URL only**:
+```bash
+curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here?webhook_url=https://new-endpoint.com/webhook" \
+  -H "X-API-Key: dev-key-123"
+```
+
+**Using JSON body (alternative format)**:
+```bash
 curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
   -H "X-API-Key: dev-key-123" \
   -H "Content-Type: application/json" \
-  -d '{"active": false}'
+  -d '{
+    "webhook_url": "https://new-endpoint.com/webhook",
+    "active": false
+  }'
 ```
 
 **Response** (200 OK):
@@ -504,6 +546,19 @@ curl -X PUT "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
 {
   "webhook_id": "webhook-uuid-here",
   "message": "Webhook updated successfully"
+}
+```
+
+**Error Responses**:
+```json
+// Webhook not found (404)
+{
+  "detail": "Webhook not found"
+}
+
+// Invalid API key (401)
+{
+  "detail": "Invalid API key"
 }
 ```
 
@@ -530,11 +585,17 @@ curl -X DELETE "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
 
 **Endpoint**: `GET /health`
 
-System health check with agent status and application information.
+System health check with agent status and application information. **No authentication required**.
 
 **Request**:
 ```bash
 curl -X GET "http://localhost:8000/health" \
+  -H "Accept: application/json"
+```
+
+**Request with verbose health info**:
+```bash
+curl -X GET "http://localhost:8000/health?verbose=true" \
   -H "Accept: application/json"
 ```
 
@@ -571,11 +632,28 @@ curl -X GET "http://localhost:8000/health" \
 }
 ```
 
+**Error Response** (503 Service Unavailable):
+```json
+{
+  "status": "unhealthy",
+  "timestamp": "2024-01-15T10:45:30Z",
+  "version": "1.0.0",
+  "environment": "development",
+  "agents": {
+    "ocr": {
+      "status": "unhealthy",
+      "last_check": "2024-01-15T10:45:29Z",
+      "error": "Mistral API connection failed"
+    }
+  }
+}
+```
+
 ### 9. Application Metrics
 
 **Endpoint**: `GET /api/v1/metrics`
 
-Retrieve application performance metrics and statistics.
+Retrieve application performance metrics and statistics. **Authentication required**.
 
 **Request**:
 ```bash
@@ -592,11 +670,44 @@ curl -X GET "http://localhost:8000/api/v1/metrics" \
   "failed_documents": 8,
   "processing_documents": 6,
   "registered_webhooks": 3,
-  "active_jobs": 2,
-  "uptime_seconds": 86400,
-  "avg_processing_time_ms": 2847
+  "active_jobs": 2
 }
 ```
+
+**Response with no documents processed** (200 OK):
+```json
+{
+  "total_documents": 0,
+  "completed_documents": 0,
+  "failed_documents": 0,
+  "processing_documents": 0,
+  "registered_webhooks": 0,
+  "active_jobs": 0
+}
+```
+
+**Error Responses**:
+```json
+// Invalid API key (401)
+{
+  "detail": "Invalid API key"
+}
+
+// API key authentication disabled but required (401)
+{
+  "detail": "Invalid API key"
+}
+```
+
+**Metrics Explanation**:
+- `total_documents`: Total number of documents uploaded since server start
+- `completed_documents`: Documents successfully processed through all pipeline stages
+- `failed_documents`: Documents that failed at any pipeline stage
+- `processing_documents`: Documents currently being processed (calculated as total - completed - failed)
+- `registered_webhooks`: Number of webhook registrations (active and inactive)
+- `active_jobs`: Number of pipeline states currently tracked in memory
+
+**Note**: Additional metrics like uptime tracking and processing time averages can be implemented by extending the metrics endpoint in `app/main.py`.
 
 ### Complete API Workflow Example
 
@@ -782,6 +893,67 @@ pytest tests/test_ocr_agent.py -v
 python test_pipeline.py path/to/test/document.pdf
 ```
 
+## Celery Task Processing
+
+### Overview
+
+The Document Ingestion Agent uses Celery for distributed task processing, enabling:
+- **Async Document Processing**: Non-blocking API responses with background pipeline execution
+- **Scalable Workers**: Multiple Celery workers can process documents in parallel
+- **Automatic Retries**: Failed tasks retry with exponential backoff
+- **Task Monitoring**: Real-time task status tracking via Redis backend
+
+### Architecture Components
+
+#### Celery Application (`app/celery_app.py`)
+```python
+# Redis Configuration
+broker: redis://redis:6379/1  # Message queue
+backend: redis://redis:6379/2  # Result storage
+```
+
+#### Task Definitions (`app/tasks.py`)
+- `process_document_task`: Main pipeline execution with agent orchestration
+- `trigger_webhooks_task`: Async webhook delivery with failure handling
+- `health_check_task`: Worker health verification
+
+### Task Flow
+
+1. **Document Upload** → FastAPI receives file
+2. **Task Queuing** → Document processing queued to Celery via Redis
+3. **Worker Execution** → Celery worker runs pipeline through agents
+4. **Result Storage** → Task results stored in Redis backend
+5. **Status Queries** → API retrieves status from Redis
+
+### Starting Celery Workers
+
+```bash
+# Development (with Docker)
+docker-compose -f docker-compose.dev.yml up celery
+
+# Production
+celery -A app.celery_app worker --loglevel=info --concurrency=4
+
+# With Flower monitoring
+celery -A app.celery_app flower --port=5555
+```
+
+### Monitoring Tasks
+
+```bash
+# Check worker status
+celery -A app.celery_app inspect active
+
+# View scheduled tasks
+celery -A app.celery_app inspect scheduled
+
+# Monitor in real-time
+celery -A app.celery_app events
+
+# Web UI (if Flower is running)
+open http://localhost:5555
+```
+
 ## Multi-Agent System
 
 ### Agent Architecture
@@ -933,6 +1105,81 @@ async def execute_pipeline(document: DocumentData, context: AgentContext) -> Pip
     # Return final state
     return pipeline_state
 ```
+
+### Celery Task Queue Architecture
+
+**Files**: `app/celery_app.py`, `app/tasks.py`
+
+**Purpose**: Asynchronous background processing for document pipeline execution
+
+**Key Features**:
+- **Redis Message Broker**: Uses Redis databases 1 & 2 for broker and result backend
+- **Task Routing**: Automatic task distribution to available Celery workers
+- **Retry Logic**: Configurable retry attempts with exponential backoff
+- **Result Persistence**: Task results stored in Redis with 1-hour expiration
+- **Webhook Integration**: Automatic webhook triggering upon completion
+
+#### Celery Configuration
+
+**File**: `app/celery_app.py`
+```python
+celery_app = Celery(
+    "document_agent",
+    broker=f"redis://{redis_host}:{redis_port}/1",
+    backend=f"redis://{redis_host}:{redis_port}/2",
+    include=["app.tasks"]
+)
+
+# Key Configuration:
+- Task time limit: 5 minutes (hard), 4.5 minutes (soft)
+- Result expiration: 1 hour
+- Worker prefetch: 1 task at a time
+- JSON serialization for cross-platform compatibility
+```
+
+#### Task Definitions
+
+**File**: `app/tasks.py`
+
+**Primary Tasks**:
+1. **`process_document_task`**: Main pipeline execution
+   - Instantiates agent orchestrator with all 5 agents
+   - Handles async-to-sync conversion for Celery compatibility
+   - Automatic retry on failure (max 3 attempts)
+   - Triggers webhooks on successful completion
+
+2. **`trigger_webhooks_task`**: Webhook delivery
+   - Sends processed schema to registered webhook URLs
+   - Handles HTTP timeouts and retries
+   - Tracks delivery success/failure metrics
+
+3. **`health_check_task`**: Worker health verification
+   - Simple connectivity test for Celery workers
+   - Used by monitoring systems
+
+#### Integration with FastAPI
+
+**Modified**: `app/main.py`
+- Document upload endpoints now queue Celery tasks instead of direct processing
+- Non-blocking API responses with job tracking
+- Status endpoint queries Celery task results
+- Background task monitoring and health checks
+
+#### Development Workflow
+
+**Hybrid Development Mode** (`docker-compose.dev.yml`):
+```yaml
+services:
+  celery:
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    volumes:
+      - ./app:/app/app  # Hot reload for development
+```
+
+**Production Mode**:
+- Multiple Celery workers for horizontal scaling
+- Persistent Redis configuration for task durability
+- Health checks and restart policies
 
 ## Configuration
 
@@ -1368,7 +1615,71 @@ print(await agent.health_check())
 "
 ```
 
-#### 5. Webhook Delivery Issues
+#### 5. Celery Worker Not Starting
+
+**Symptoms**:
+- Error: `The module app.celery_app was not found`
+- Celery worker fails to start
+- Background task processing not working
+
+**Root Cause**:
+- Missing `app/celery_app.py` file
+- Incorrect module imports
+
+**Solution**:
+The project now includes the required Celery configuration files:
+- `app/celery_app.py`: Celery application configuration
+- `app/tasks.py`: Task definitions for document processing
+
+If you still encounter issues:
+```bash
+# Verify files exist
+ls -la app/celery_app.py app/tasks.py
+
+# Check Celery worker logs
+docker-compose -f docker-compose.dev.yml logs celery
+
+# Restart Celery worker
+docker-compose -f docker-compose.dev.yml restart celery
+
+# Test Celery connection
+docker-compose -f docker-compose.dev.yml exec celery celery -A app.celery_app inspect ping
+```
+
+#### 6. Redis Memory Overcommit Warning
+
+**Symptoms**:
+- Warning: `WARNING Memory overcommit must be enabled!`
+- Appears in Redis container logs
+- May cause background save failures under memory pressure
+
+**Note**: This is an informational warning in Docker environments and doesn't prevent Redis from functioning.
+
+**Solutions**:
+
+**Option 1: Fix on Host System (Recommended for Production)**
+```bash
+# Set memory overcommit on host
+sudo sysctl vm.overcommit_memory=1
+
+# Make permanent
+echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf
+
+# Verify setting
+sysctl vm.overcommit_memory
+```
+
+**Option 2: Ignore for Development**
+The warning doesn't affect development functionality. Redis will work normally despite the warning.
+
+**Option 3: Use Different Redis Configuration**
+```yaml
+# In docker-compose.dev.yml
+redis:
+  command: redis-server --save "" --appendonly no  # Disable persistence
+```
+
+#### 7. Webhook Delivery Issues
 
 **Symptoms**:
 - Webhooks not triggering
@@ -1487,41 +1798,206 @@ curl -H "X-API-Key: dev-key-123" \
 
 ## Latest Updates
 
-### Recent Changes (January 2025)
+## Developer Guide (Claude Code Instructions)
 
-1. **Enhanced Documentation**: Comprehensive API documentation with detailed curl examples for all 9 endpoints
-2. **Improved Architecture Diagrams**: Updated mermaid diagrams showing system components, pipeline flow, and development workflow
-3. **Development Workflow**: Three flexible development modes (Hybrid, Full Docker, Dependencies Only)
-4. **Configuration Management**: Pydantic V2 implementation with environment variable aliases and validation
-5. **Error Handling**: Improved error responses and troubleshooting documentation
-6. **Performance Monitoring**: Added metrics endpoint and health checking capabilities
-7. **Webhook System**: Complete webhook management with registration, updates, and automatic triggering
-8. **Testing Framework**: Comprehensive testing setup with integration tests and performance benchmarks
+This section provides guidance for Claude Code (claude.ai/code) and developers working with this repository.
+
+### Key Implementation Details
+
+#### Agent Base Class Pattern
+All agents inherit from `BaseAgent` (app/agents/base_agent.py) which provides:
+- Async execution with `execute()` method
+- Automatic retry logic with exponential backoff
+- Health check capabilities
+- Standardized error handling
+- Metrics collection hooks
+
+#### Mistral OCR Integration
+The `MistralOCRAgent` (app/agents/mistral_ocr_agent.py) is the exclusive OCR provider:
+- Handles rate limiting with configurable delay
+- Implements intelligent retry logic
+- Supports both PDF and image formats
+- Uses httpx for async HTTP requests
+
+#### State Management
+- In-memory state storage for development (dictionaries in main.py)
+- Production should use Redis or PostgreSQL (models not yet implemented)
+- Pipeline states tracked in `PipelineState` objects
+
+### File Structure Patterns
+
+- **Agents**: All in `app/agents/` directory, inherit from `base_agent.py`
+- **Configuration**: Centralized in `app/config.py` using Pydantic Settings
+- **API Routes**: All in `app/main.py` (consider splitting if it grows)
+- **Docker**: `docker-compose.yml` for full stack, `Dockerfile` for app image
+- **Celery Tasks**: `app/tasks.py` for async processing, `app/celery_app.py` for configuration
+
+### Common Development Tasks
+
+#### Adding a New Agent
+1. Create new file in `app/agents/`
+2. Inherit from `BaseAgent`
+3. Implement `async def process()` method
+4. Register in `AgentOrchestrator` in `app/main.py` startup event
+
+#### Modifying Pipeline Flow
+1. Update `PipelineStage` enum in `agent_orchestrator.py`
+2. Modify `execute_pipeline()` method to add new stage
+3. Update agent registration in `startup_event()`
+
+#### Adding New Document Type
+1. Update classification patterns in `ClassificationAgent`
+2. Add extraction logic in `ContentAnalysisAgent`
+3. Define schema template in `SchemaGenerationAgent`
+4. Add validation rules in `ValidationAgent`
+
+### Code Quality Commands
+
+```bash
+# Format code
+black app/ --line-length 100
+
+# Lint code
+ruff check app/
+
+# Type checking
+mypy app/
+
+# Run unit tests
+pytest tests/
+
+# Run with coverage
+pytest --cov=app tests/
+
+# Run specific test
+pytest tests/test_ocr_agent.py -v
+```
+
+### Testing Individual Components
+
+```bash
+# Test the pipeline with sample document
+python test_pipeline.py
+
+# Test with specific document
+python test_pipeline.py path/to/document.pdf
+
+# Test specific endpoint
+curl -X POST "http://localhost:8000/api/v1/documents/upload" \
+  -H "X-API-Key: test-key-1" \
+  -F "file=@sample.pdf"
+```
+
+### Recent Changes (September 2025)
+
+#### Mermaid Diagram Fixes & Documentation Enhancements
+1. **Fixed Mermaid Syntax Issues**: Resolved "Could not find a suitable point for the given distance" errors
+   - Fixed complex node labels with line breaks causing rendering failures
+   - Simplified connection syntax in system architecture diagram
+   - Updated pipeline state flow diagram with cleaner state definitions
+   - Enhanced development workflow diagram with proper subgraph naming
+
+2. **Comprehensive API Documentation**: Complete curl examples for all 9 endpoints
+   - Added detailed error response examples for every endpoint
+   - Corrected webhook registration endpoint to show query parameter usage
+   - Added comprehensive metrics endpoint documentation with field explanations
+   - Included authentication requirements clearly marked for each endpoint
+   - Added alternative JSON body formats where applicable
+
+#### Current Implementation Status
+3. **Celery Task Queue System**: Fully implemented with Redis message broker
+   - `app/celery_app.py`: Redis broker (DB1) and backend (DB2) configuration
+   - `app/tasks.py`: Document processing, webhook triggering, and health check tasks
+   - `app/main.py`: API endpoints using Celery task queuing instead of background tasks
+   - Automatic retry logic with exponential backoff (max 3 retries)
+
+4. **Redis State Management**: Multi-database configuration
+   - Database 0: General caching and application state
+   - Database 1: Celery message broker queue
+   - Database 2: Celery task results backend
+
+5. **API Endpoint Implementation**: All 9 endpoints fully functional
+   - Document upload with Celery task queuing
+   - Status monitoring with pipeline state tracking
+   - Schema retrieval for completed documents
+   - Complete webhook CRUD operations (register, list, update, delete)
+   - Health check with agent status monitoring
+   - Application metrics with processing statistics
+
+#### Architecture & Configuration
+6. **Multi-Agent Pipeline**: 5-agent architecture fully implemented
+   - ClassificationAgent: Document type identification
+   - MistralOCRAgent: Exclusive OCR provider with rate limiting
+   - ContentAnalysisAgent: Pattern-based field extraction
+   - SchemaGenerationAgent: Standardized JSON schema creation
+   - ValidationAgent: Business rules validation
+
+7. **Configuration Management**: Pydantic V2 with environment variables
+   - Comprehensive settings in `app/config.py`
+   - Docker development modes (Hybrid, Full Docker, Dependencies Only)
+   - Environment-specific configuration templates
+
+8. **Development & Deployment**: Production-ready setup
+   - Docker Compose configurations for development and production
+   - Kubernetes deployment manifests
+   - Health monitoring and metrics collection
+   - Comprehensive troubleshooting documentation
 
 ### Technical Improvements
 
-- **Celery Integration**: Background task processing with Redis message broker
-- **Async Processing**: Non-blocking document processing with FastAPI background tasks
-- **Rate Limiting**: Intelligent API protection with configurable limits
-- **File Validation**: Content type checking, size limits, and deduplication
-- **Health Monitoring**: Real-time agent status and application metrics
-- **Docker Development**: Multi-environment Docker configurations for different development needs
+**Current Implementation Features**:
+- **Celery Task Processing**: Distributed background processing with Redis message broker
+- **Multi-Database Redis**: Separate databases for caching (DB0), broker (DB1), and results (DB2)
+- **Async Pipeline Execution**: Non-blocking document processing through 5-agent architecture
+- **Intelligent Rate Limiting**: Mistral API rate limiting with exponential backoff retry logic
+- **Comprehensive File Validation**: MIME type checking, size limits, and SHA-256 deduplication
+- **Real-Time Health Monitoring**: Agent status checking with detailed error reporting
+- **Flexible Development Modes**: Hybrid, Full Docker, and Dependencies-Only configurations
+- **Production-Ready Deployment**: Docker Compose and Kubernetes configurations
+- **Complete API Coverage**: 9 endpoints with authentication, webhooks, and metrics
 
-### Dependencies
+### Dependencies & Technology Stack
 
-- **Python 3.11+**: Modern Python features and performance improvements
-- **FastAPI**: High-performance async web framework
-- **Celery 5.4.0**: Distributed task queue for background processing
-- **Redis 7**: Message broker and caching layer
-- **Mistral AI**: Exclusive OCR provider with rate limiting
-- **Pydantic V2**: Configuration management and data validation
-- **Docker & Docker Compose**: Containerization and orchestration
+**Core Framework**:
+- **Python 3.11+**: Modern async features and performance improvements
+- **FastAPI**: High-performance async web framework with automatic OpenAPI documentation
+- **Celery 5.4.0**: Distributed task queue with Redis broker and result backend
+- **Redis 7**: Multi-purpose data store (message broker, results, caching)
+
+**AI & Processing**:
+- **Mistral AI**: Exclusive OCR provider with intelligent rate limiting and retry logic
+- **httpx**: Async HTTP client for external API calls and webhook delivery
+- **Pydantic V2**: Data validation, serialization, and configuration management
+
+**Infrastructure**:
+- **Docker & Docker Compose**: Multi-environment containerization and orchestration
+- **uvicorn**: ASGI server for FastAPI application
+- **python-multipart**: File upload handling for multipart/form-data requests
+
+**Development & Testing**:
+- **pytest**: Testing framework with async support and coverage reporting
+- **mypy**: Static type checking for code quality
+- **black**: Code formatting and style enforcement
+- **ruff**: Fast Python linter for code quality checks
 
 ---
 
 **Project Status**: Production Ready ✅  
-**Last Updated**: January 2025  
+**Last Updated**: September 2025  
 **Version**: 1.0.0  
 **License**: MIT  
+
+**Quick Start Commands**:
+```bash
+# Start development environment
+docker-compose -f docker-compose.dev.yml up -d
+./run_server.sh
+
+# Test the pipeline
+python test_pipeline.py
+
+# Check API documentation
+open http://localhost:8000/api/v1/docs
+```
 
 For issues, feature requests, or contributions, please refer to the project repository.

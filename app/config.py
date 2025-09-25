@@ -58,8 +58,8 @@ class Settings(BaseSettings):
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
     cache_ttl_seconds: int = 3600  # 1 hour
     
-    # PostgreSQL Configuration
-    database_url: str = Field(default="postgresql://user:password@localhost/document_agent", alias="DATABASE_URL")
+    # PostgreSQL Configuration (Optional - defaults to Redis for state management)
+    database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
     database_pool_size: int = 10
     database_max_overflow: int = 20
     

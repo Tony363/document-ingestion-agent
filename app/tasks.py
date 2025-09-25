@@ -23,6 +23,7 @@ from .agents import (
 from .agents.base_agent import AgentContext
 from .agents.agent_orchestrator import DocumentData
 from .config import settings
+from .services.state_manager import get_state_manager
 
 # Configure logging
 logger = get_task_logger(__name__)
@@ -115,15 +116,27 @@ def process_document_task(self, document_dict: Dict[str, Any], context_dict: Dic
                         "data": agent_result.data.dict() if hasattr(agent_result.data, 'dict') else agent_result.data
                     }
             
+            # Store result in Redis for status/schema endpoints
+            state_manager = get_state_manager(settings.redis_host, settings.redis_port, 0)
+            state_manager.store_task_result(context.job_id, result)
+            
+            # Update document status in Redis
+            state_manager.update_document_status(context.document_id, "completed")
+            
             # Check if validation passed for webhook triggering
             if pipeline_state.stage == "completed":
                 validation_result = pipeline_state.agent_results.get("validation", {})
                 if validation_result and validation_result.data and hasattr(validation_result.data, 'is_valid'):
                     if validation_result.data.is_valid:
-                        # Queue webhook notification task
-                        trigger_webhooks_task.delay(
-                            result["agent_results"].get("schema", {}).get("data", {})
-                        )
+                        # Queue webhook notification task with full payload
+                        webhook_payload = {
+                            "event": "document.processed",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "document_id": context.document_id,
+                            "job_id": context.job_id,
+                            "schema": result["agent_results"].get("schema", {}).get("data", {})
+                        }
+                        trigger_webhooks_task.delay(webhook_payload)
             
             logger.info(f"Document processing completed for job_id: {context.job_id}")
             return result
@@ -154,19 +167,19 @@ def process_document_task(self, document_dict: Dict[str, Any], context_dict: Dic
     max_retries=3,
     default_retry_delay=30
 )
-def trigger_webhooks_task(schema_data: Dict[str, Any]) -> Dict[str, Any]:
+def trigger_webhooks_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Trigger registered webhooks with document processing results
     
     Args:
-        schema_data: Generated schema to send to webhooks
+        payload: Full webhook payload with event, timestamp, document_id, job_id, and schema
         
     Returns:
         Webhook delivery results
     """
     import httpx
     
-    logger.info("Triggering webhooks with document schema")
+    logger.info(f"Triggering webhooks for document {payload.get('document_id')}")
     
     results = {
         "webhooks_triggered": 0,
@@ -174,25 +187,29 @@ def trigger_webhooks_task(schema_data: Dict[str, Any]) -> Dict[str, Any]:
         "details": []
     }
     
-    # This would normally fetch from database
-    # For now, using in-memory storage from main app
-    # In production, implement proper webhook storage
+    # Get webhooks from Redis shared state
+    state_manager = get_state_manager(settings.redis_host, settings.redis_port, 0)
     
     try:
-        # TODO: Implement webhook fetching from persistent storage
-        # For now, this is a placeholder
-        webhooks = []  # Fetch from database
+        # Fetch active webhooks from Redis
+        webhooks = state_manager.list_webhooks(active_only=True)
         
         for webhook in webhooks:
             if not webhook.get("active"):
+                continue
+                
+            # Check if webhook is subscribed to this event
+            events = webhook.get("events", ["document.processed"])
+            if payload.get("event") not in events:
                 continue
                 
             try:
                 with httpx.Client() as client:
                     response = client.post(
                         webhook["url"],
-                        json=schema_data,
-                        timeout=settings.webhook_timeout_seconds
+                        json=payload,  # Send full payload, not just schema
+                        timeout=settings.webhook_timeout_seconds,
+                        headers={"Content-Type": "application/json"}
                     )
                     
                     if 200 <= response.status_code < 300:

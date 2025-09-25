@@ -194,11 +194,15 @@ nano .env
 
 Required environment variables:
 ```env
+# Required
 MISTRAL_API_KEY=your_mistral_api_key_here
+
+# Optional (with defaults)
 API_HOST=0.0.0.0
 API_PORT=8000
 REDIS_HOST=localhost
-DATABASE_URL=postgresql://user:password@localhost/dbname
+# DATABASE_URL is optional - Redis is used for state management by default
+# DATABASE_URL=postgresql://user:password@localhost/dbname
 ```
 
 ### 3. Quick Start Options
@@ -215,7 +219,7 @@ docker-compose -f docker-compose.dev.yml up -d
 **Option B: Full Docker**
 ```bash
 # Start everything in containers
-docker-compose up --build
+docker-compose -f docker-compose.dev.yml up --build
 ```
 
 ### 4. Test the Pipeline
@@ -797,7 +801,7 @@ Run everything in containers for environment consistency:
 
 ```bash
 # Start all services
-docker-compose up --build
+docker-compose -f docker-compose.dev.yml up --build
 
 # View logs
 docker-compose logs -f app
@@ -842,8 +846,8 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=0
 
-# Database (Optional - uses in-memory for development)
-DATABASE_URL=postgresql://user:password@localhost/document_agent
+# Database (Optional - uses Redis for state management by default)
+# DATABASE_URL=postgresql://user:password@localhost/document_agent
 
 # File Processing
 MAX_UPLOAD_SIZE_MB=10

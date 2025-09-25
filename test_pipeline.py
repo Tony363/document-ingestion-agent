@@ -10,7 +10,6 @@ import httpx
 import sys
 from pathlib import Path
 import json
-import time
 
 # API Configuration
 API_BASE_URL = "http://localhost:8000/api/v1"

@@ -12,7 +12,6 @@ from typing import Optional, List, Dict, Any
 import uuid
 import hashlib
 from pathlib import Path
-import shutil
 import logging
 from datetime import datetime
 from slowapi import Limiter, _rate_limit_exceeded_handler

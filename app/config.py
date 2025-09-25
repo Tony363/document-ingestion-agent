@@ -7,7 +7,7 @@ Uses environment variables with sensible defaults.
 
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator, model_validator
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Set
 import os
 
 class Settings(BaseSettings):
@@ -26,8 +26,6 @@ class Settings(BaseSettings):
     workers: int = Field(default=4, alias="WORKERS")
     
     # API Configuration
-    api_host: str = Field(default="0.0.0.0", alias="HOST")  # Backward compatibility
-    api_port: int = Field(default=8000, alias="PORT")  # Backward compatibility
     api_prefix: str = "/api/v1"
     cors_origins: List[str] = Field(default=["*"])
     allowed_origins: str = Field(default="*", alias="ALLOWED_ORIGINS")
@@ -41,9 +39,9 @@ class Settings(BaseSettings):
     
     # File Processing Configuration
     max_file_size: int = Field(default=52428800, alias="MAX_FILE_SIZE")  # bytes
-    max_upload_size_mb: int = 50  # Backward compatibility, derived from max_file_size
+    max_upload_size_mb: int = Field(default=50)  # Converted from max_file_size
     supported_file_types: str = Field(default=".pdf,.png,.jpg,.jpeg,.tiff,.bmp", alias="SUPPORTED_FILE_TYPES")
-    allowed_extensions: List[str] = [".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"]  # Backward compatibility
+    allowed_extensions: List[str] = Field(default_factory=lambda: [".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".bmp"])
     upload_directory: str = Field(default="/tmp/document-uploads", alias="UPLOAD_DIRECTORY")
     
     # Processing Settings
@@ -79,14 +77,12 @@ class Settings(BaseSettings):
     # Security Configuration
     api_key_header: str = "X-API-Key"
     api_key_required: bool = Field(default=False, alias="API_KEY_REQUIRED")
-    enable_api_key_auth: bool = Field(default=False, alias="API_KEY_REQUIRED")  # Backward compatibility
     api_keys: List[str] = []  # Load from environment or secrets manager
+    _api_keys_set: Optional[set] = None  # Cached set for O(1) lookup
     
     # Webhook Configuration
-    webhook_timeout: int = Field(default=10, alias="WEBHOOK_TIMEOUT")
-    webhook_timeout_seconds: int = 30  # Backward compatibility
+    webhook_timeout: int = Field(default=30, alias="WEBHOOK_TIMEOUT")  # seconds
     webhook_retry_attempts: int = Field(default=3, alias="WEBHOOK_RETRY_ATTEMPTS")
-    webhook_max_retries: int = 3  # Backward compatibility
     webhook_retry_delay_seconds: int = 5
     
     # Monitoring Configuration
@@ -118,32 +114,21 @@ class Settings(BaseSettings):
         
     @model_validator(mode='after')
     def sync_derived_fields(self):
-        """Synchronize derived and backward compatibility fields"""
+        """Synchronize derived fields"""
         
         # Parse supported_file_types into allowed_extensions
-        if hasattr(self, 'supported_file_types') and self.supported_file_types:
+        if self.supported_file_types:
             self.allowed_extensions = [ext.strip() for ext in self.supported_file_types.split(",")]
             
         # Parse allowed_origins into cors_origins  
-        if hasattr(self, 'allowed_origins') and self.allowed_origins:
+        if self.allowed_origins:
             if self.allowed_origins == "*":
                 self.cors_origins = ["*"]
             else:
                 self.cors_origins = [origin.strip() for origin in self.allowed_origins.split(",")]
             
         # Calculate max_upload_size_mb from max_file_size
-        if hasattr(self, 'max_file_size'):
-            self.max_upload_size_mb = self.max_file_size // (1024 * 1024)
-            
-        # Sync webhook settings
-        if hasattr(self, 'webhook_timeout'):
-            self.webhook_timeout_seconds = self.webhook_timeout
-        if hasattr(self, 'webhook_retry_attempts'):
-            self.webhook_max_retries = self.webhook_retry_attempts
-            
-        # Sync auth settings
-        if hasattr(self, 'api_key_required'):
-            self.enable_api_key_auth = self.api_key_required
+        self.max_upload_size_mb = self.max_file_size // (1024 * 1024)
             
         return self
     
@@ -185,6 +170,20 @@ class Settings(BaseSettings):
     def get_cors_origins(self) -> List[str]:  
         """Get list of CORS origins"""
         return self.cors_origins
+    
+    def get_api_keys_set(self) -> set:
+        """Get API keys as a set for O(1) lookup performance"""
+        if self._api_keys_set is None:
+            self._api_keys_set = set(self.api_keys)
+        return self._api_keys_set
+    
+    def is_valid_api_key(self, key: Optional[str]) -> bool:
+        """Check if an API key is valid with O(1) performance"""
+        if not self.api_key_required:
+            return True
+        if not key:
+            return False
+        return key in self.get_api_keys_set()
 
 # Create settings instance
 settings = Settings()

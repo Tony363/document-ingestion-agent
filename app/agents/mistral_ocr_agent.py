@@ -17,6 +17,7 @@ from mistralai import Mistral
 
 from .base_agent import BaseAgent, AgentContext
 from ..config import settings
+from ..utils.security import validate_file_access, PathTraversalError, log_security_event
 
 class OCRInput(BaseModel):
     """Input for OCR processing"""
@@ -68,23 +69,41 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
         self.client = Mistral(api_key=api_key)
         
     async def validate_input(self, input_data: OCRInput) -> bool:
-        """Validate OCR input"""
+        """Validate OCR input with security checks"""
         if not input_data.file_path:
             return False
             
-        # Resolve full path using environment-aware method
-        path = Path(settings.get_upload_path()) / input_data.file_path
-        if not path.exists():
-            self.logger.error(f"File not found: {path}")
-            return False
+        try:
+            # Securely validate file path and existence
+            validated_path = validate_file_access(
+                input_data.file_path, 
+                base_dir=settings.get_upload_path(),
+                must_exist=True
+            )
             
-        # Check file size
-        file_size_mb = path.stat().st_size / (1024 * 1024)
-        if file_size_mb > self.max_file_size_mb:
-            self.logger.error(f"File too large: {file_size_mb}MB > {self.max_file_size_mb}MB")
-            return False
+            # Check file size
+            file_size_mb = validated_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > self.max_file_size_mb:
+                self.logger.error(f"File too large: {file_size_mb}MB > {self.max_file_size_mb}MB")
+                return False
+                
+            return True
             
-        return True
+        except (PathTraversalError, FileNotFoundError, ValueError, PermissionError) as e:
+            # Log security event for path traversal attempts
+            if isinstance(e, PathTraversalError):
+                log_security_event(
+                    "PATH_TRAVERSAL_ATTEMPT",
+                    {
+                        "agent": "mistral_ocr_agent",
+                        "file_path": input_data.file_path,
+                        "error": str(e)
+                    },
+                    level="ERROR"
+                )
+            
+            self.logger.error(f"File validation failed: {e}")
+            return False
     
     async def process(
         self,
@@ -104,8 +123,30 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
         import time
         start_time = time.time()
         
-        # Resolve full path using environment-aware method
-        file_path = Path(settings.get_upload_path()) / input_data.file_path
+        try:
+            # Securely resolve file path
+            file_path = validate_file_access(
+                input_data.file_path,
+                base_dir=settings.get_upload_path(),
+                must_exist=True
+            )
+        except (PathTraversalError, FileNotFoundError, ValueError, PermissionError) as e:
+            # Log security event for path traversal attempts
+            if isinstance(e, PathTraversalError):
+                log_security_event(
+                    "PATH_TRAVERSAL_ATTEMPT",
+                    {
+                        "agent": "mistral_ocr_agent",
+                        "operation": "process",
+                        "file_path": input_data.file_path,
+                        "error": str(e)
+                    },
+                    level="ERROR"
+                )
+            
+            self.logger.error(f"Secure file path resolution failed: {e}")
+            # Return empty result for security failures
+            return self._create_empty_result(int((time.time() - start_time) * 1000))
         
         # Process with Mistral OCR API
         pages = []
@@ -206,16 +247,7 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
             average_confidence = sum(page.confidence for page in pages) / len(pages)
         else:
             # Return empty result if no extraction succeeded
-            full_text = ""
-            average_confidence = 0.0
-            pages = [OCRPage(
-                page_number=1,
-                text="",
-                confidence=0.0,
-                word_count=0,
-                has_tables=False,
-                has_images=False
-            )]
+            return self._create_empty_result(int((time.time() - start_time) * 1000))
         
         processing_time = int((time.time() - start_time) * 1000)
         
@@ -233,12 +265,35 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
             }
         )
     
+    def _create_empty_result(self, processing_time: int) -> OCROutput:
+        """Create empty OCR result for error cases"""
+        return OCROutput(
+            total_pages=1,
+            processed_pages=0,
+            full_text="",
+            pages=[OCRPage(
+                page_number=1,
+                text="",
+                confidence=0.0,
+                word_count=0,
+                has_tables=False,
+                has_images=False
+            )],
+            average_confidence=0.0,
+            processing_time_ms=processing_time,
+            metadata={
+                "method": "mistral_ocr_api",
+                "model": "mistral-ocr-latest",
+                "error": "File validation failed"
+            }
+        )
+    
     async def _extract_pdf_text_fallback(self, file_path: Path) -> Optional[str]:
         """
         Fallback: Extract text from PDF if OCR fails
         
         Args:
-            file_path: Path to PDF file
+            file_path: Secure path to PDF file
             
         Returns:
             Extracted text or None if not extractable

@@ -21,8 +21,16 @@ def recover_pending_tasks(sender, **kwargs):
     logger.info("Worker starting - checking for stuck tasks...")
     
     try:
-        # Connect to Redis
-        r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        # Import settings to get Redis configuration
+        from .config import settings
+        
+        # Connect to Redis using configuration
+        r = redis.Redis(
+            host=settings.redis_host, 
+            port=settings.redis_port, 
+            db=0, 
+            decode_responses=True
+        )
         
         # Get all document keys
         doc_keys = r.keys("doc:*")
@@ -114,7 +122,13 @@ def log_task_failure(sender=None, task_id=None, exception=None, args=None, kwarg
             if isinstance(context, dict):
                 document_id = context.get('document_id')
                 if document_id:
-                    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+                    from .config import settings
+                    r = redis.Redis(
+                        host=settings.redis_host, 
+                        port=settings.redis_port, 
+                        db=0, 
+                        decode_responses=True
+                    )
                     doc_key = f'doc:{document_id}'
                     metadata_str = r.get(doc_key)
                     

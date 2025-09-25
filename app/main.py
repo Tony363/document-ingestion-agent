@@ -32,6 +32,13 @@ from .agents.base_agent import AgentContext
 from .agents.agent_orchestrator import DocumentData, PipelineState
 from .models.webhook_models import WebhookRegistration, WebhookUpdate, WebhookResponse
 from .services.state_manager import get_state_manager
+from .utils.security import (
+    create_secure_upload_path,
+    validate_filename,
+    PathTraversalError,
+    log_security_event,
+    get_secure_upload_path
+)
 from celery.result import AsyncResult
 from .celery_app import celery_app
 
@@ -93,8 +100,9 @@ async def startup_event():
     """Initialize application on startup"""
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     
-    # Create upload directory if it doesn't exist
-    Path(settings.get_upload_path()).mkdir(parents=True, exist_ok=True)
+    # Create secure upload directory if it doesn't exist
+    secure_upload_path = get_secure_upload_path()
+    logger.info(f"Upload directory: {secure_upload_path}")
     
     # Initialize and register agents
     classification_agent = ClassificationAgent()
@@ -123,9 +131,9 @@ async def shutdown_event():
 
 # Dependency for API key authentication
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-    """Verify API key if authentication is enabled"""
-    if settings.enable_api_key_auth:
-        if not x_api_key or x_api_key not in settings.api_keys:
+    """Verify API key if authentication is enabled with O(1) performance"""
+    if settings.api_key_required:
+        if not settings.is_valid_api_key(x_api_key):
             raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
@@ -144,23 +152,96 @@ async def upload_document(
     Returns:
         job_id: Unique identifier for tracking the processing job
     """
-    # Validate file extension
-    file_extension = Path(file.filename).suffix.lower()
+    # Validate filename security first
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Filename is required"
+        )
+    
+    try:
+        # Validate and sanitize filename
+        safe_filename = validate_filename(file.filename)
+    except (PathTraversalError, ValueError) as e:
+        # Log security event for dangerous filename attempts
+        if isinstance(e, PathTraversalError):
+            log_security_event(
+                "DANGEROUS_FILENAME_ATTEMPT",
+                {
+                    "endpoint": "upload_document",
+                    "filename": file.filename,
+                    "remote_addr": get_remote_address(request),
+                    "error": str(e)
+                },
+                level="ERROR"
+            )
+        
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid filename: {str(e)}"
+        )
+    
+    # Validate file extension from sanitized filename
+    file_extension = Path(safe_filename).suffix.lower()
     if file_extension not in settings.allowed_extensions:
         raise HTTPException(
             status_code=400,
             detail=f"File type {file_extension} not supported"
         )
     
-    # Check file size
-    file_size = 0
-    content = await file.read()
-    file_size = len(content)
+    # Check file size BEFORE reading content (DoS prevention)
+    # Use SpooledTemporaryFile to get size without loading into memory
+    import os
+    from tempfile import SpooledTemporaryFile
     
-    if file_size > settings.max_upload_size_mb * 1024 * 1024:
+    # First, check the Content-Length header if available
+    content_length = request.headers.get('content-length')
+    if content_length:
+        try:
+            file_size = int(content_length)
+            if file_size > settings.max_upload_size_mb * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,  # 413 Payload Too Large
+                    detail=f"File size {file_size/1024/1024:.2f}MB exceeds {settings.max_upload_size_mb}MB limit"
+                )
+        except (ValueError, TypeError):
+            # Invalid content-length header, continue with streaming check
+            pass
+    
+    # Stream file content with size checking to prevent memory exhaustion
+    max_size_bytes = settings.max_upload_size_mb * 1024 * 1024
+    content_chunks = []
+    file_size = 0
+    chunk_size = 8192  # 8KB chunks
+    
+    # Read file in chunks to avoid loading large files into memory
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        
+        file_size += len(chunk)
+        
+        # Check size limit during streaming
+        if file_size > max_size_bytes:
+            # Clear chunks to free memory immediately
+            content_chunks.clear()
+            raise HTTPException(
+                status_code=413,  # 413 Payload Too Large
+                detail=f"File size exceeds {settings.max_upload_size_mb}MB limit during upload"
+            )
+        
+        content_chunks.append(chunk)
+    
+    # Reconstruct content from chunks
+    content = b''.join(content_chunks)
+    content_chunks.clear()  # Free memory
+    
+    # Validate actual file size
+    if file_size == 0:
         raise HTTPException(
             status_code=400,
-            detail=f"File size exceeds {settings.max_upload_size_mb}MB limit"
+            detail="Empty file not allowed"
         )
     
     # Generate unique identifiers
@@ -170,16 +251,41 @@ async def upload_document(
     # Calculate content hash for deduplication
     content_hash = hashlib.sha256(content).hexdigest()
     
-    # Save file to disk
-    file_path = Path(settings.get_upload_path()) / f"{document_id}{file_extension}"
-    with open(file_path, "wb") as f:
-        f.write(content)
+    try:
+        # Create secure file path using document ID to prevent filename-based attacks
+        secure_filename = f"{document_id}{file_extension}"
+        file_path = create_secure_upload_path(secure_filename, document_id=None)
+        
+        # Save file to secure location
+        with open(file_path, "wb") as f:
+            f.write(content)
+            
+        logger.info(f"Securely saved file: {file_path}")
+        
+    except (PathTraversalError, ValueError, OSError, PermissionError) as e:
+        # Log security event for path creation failures
+        log_security_event(
+            "SECURE_PATH_CREATION_FAILED",
+            {
+                "endpoint": "upload_document",
+                "document_id": document_id,
+                "filename": safe_filename,
+                "error": str(e)
+            },
+            level="ERROR"
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save file securely"
+        )
     
     # Create document metadata
     metadata = {
         "job_id": job_id,
         "document_id": document_id,
-        "file_name": file.filename,
+        "file_name": safe_filename,  # Store sanitized filename
+        "original_filename": file.filename,  # Store original for reference
         "file_size": file_size,
         "file_path": str(file_path),
         "content_hash": content_hash,
@@ -199,7 +305,7 @@ async def upload_document(
         job_id=job_id,
         document_id=document_id,
         metadata={
-            "file_name": file.filename,
+            "file_name": safe_filename,
             "upload_time": datetime.utcnow().isoformat()
         }
     )
@@ -207,7 +313,7 @@ async def upload_document(
     # Create document data with just filename for cross-environment compatibility
     filename = f"{document_id}{file_extension}"
     document = DocumentData(
-        file_path=filename,  # Just filename, agents will resolve full path
+        file_path=filename,  # Just filename, agents will resolve full path securely
         mime_type=file.content_type or "application/octet-stream",
         file_size=file_size,
         content_hash=content_hash

@@ -71,6 +71,70 @@ class AgentOrchestrator:
         self.agents[stage] = agent
         self.logger.info(f"Registered agent {agent.name} for stage {stage}")
         
+    def _get_document_type(self, state: PipelineState) -> str:
+        """
+        Safely extract document type from classification results
+        
+        Args:
+            state: Current pipeline state
+            
+        Returns:
+            Document type or "unknown" if not available
+        """
+        classification_result = state.agent_results.get("classification")
+        if classification_result and classification_result.data:
+            if hasattr(classification_result.data, 'document_type'):
+                return classification_result.data.document_type
+        return "unknown"
+    
+    def _get_ocr_text(self, state: PipelineState) -> str:
+        """
+        Safely extract OCR text from results
+        
+        Args:
+            state: Current pipeline state
+            
+        Returns:
+            Extracted text or empty string if not available
+        """
+        ocr_result = state.agent_results.get("ocr")
+        if ocr_result and ocr_result.data:
+            if hasattr(ocr_result.data, 'full_text'):
+                return ocr_result.data.full_text
+        return ""
+    
+    def _get_analysis_data(self, state: PipelineState) -> Dict[str, Any]:
+        """
+        Safely extract analysis data from results
+        
+        Args:
+            state: Current pipeline state
+            
+        Returns:
+            Analysis data dictionary or empty dict if not available
+        """
+        analysis_result = state.agent_results.get("analysis")
+        if analysis_result and analysis_result.data:
+            if hasattr(analysis_result.data, 'dict'):
+                return analysis_result.data.dict()
+        return {}
+    
+    def _get_schema_data(self, state: PipelineState) -> Dict[str, Any]:
+        """
+        Safely extract schema data from results
+        
+        Args:
+            state: Current pipeline state
+            
+        Returns:
+            Schema data dictionary or empty dict if not available
+        """
+        schema_result = state.agent_results.get("schema")
+        if schema_result and schema_result.data:
+            if hasattr(schema_result.data, 'dict'):
+                return schema_result.data.dict()
+        return {}
+        
     async def execute_pipeline(
         self,
         document: DocumentData,
@@ -116,10 +180,13 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "ocr" in self.agents:
+                # Safely get document type from classification results
+                document_type = self._get_document_type(state)
+                
                 ocr_input = OCRInput(
                     file_path=document.file_path,
                     mime_type=document.mime_type,
-                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                    document_type=document_type
                 )
                 
                 ocr_result = await self.agents["ocr"].execute(
@@ -135,9 +202,13 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "analysis" in self.agents:
+                # Safely get OCR text and document type
+                extracted_text = self._get_ocr_text(state)
+                document_type = self._get_document_type(state)
+                
                 analysis_input = AnalysisInput(
-                    extracted_text=state.agent_results["ocr"].data.full_text if state.agent_results.get("ocr") and state.agent_results["ocr"].data else "",
-                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                    extracted_text=extracted_text,
+                    document_type=document_type
                 )
                 
                 analysis_result = await self.agents["analysis"].execute(
@@ -153,9 +224,13 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "schema" in self.agents:
+                # Safely get document type and analysis data
+                document_type = self._get_document_type(state)
+                extracted_data = self._get_analysis_data(state)
+                
                 schema_input = SchemaInput(
-                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown",
-                    extracted_data=state.agent_results["analysis"].data.dict() if state.agent_results.get("analysis") and state.agent_results["analysis"].data else {}
+                    document_type=document_type,
+                    extracted_data=extracted_data
                 )
                 
                 schema_result = await self.agents["schema"].execute(
@@ -171,9 +246,13 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "validation" in self.agents:
+                # Safely get schema data and document type
+                schema_data = self._get_schema_data(state)
+                document_type = self._get_document_type(state)
+                
                 validation_input = ValidationInput(
-                    schema=state.agent_results["schema"].data.dict() if state.agent_results.get("schema") and state.agent_results["schema"].data else {},
-                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                    schema=schema_data,
+                    document_type=document_type
                 )
                 
                 validation_result = await self.agents["validation"].execute(
@@ -207,6 +286,7 @@ class AgentOrchestrator:
     async def execute_parallel_stages(
         self,
         stages: List[str],
+        inputs: Dict[str, Any],
         context: AgentContext
     ) -> Dict[str, AgentResult]:
         """
@@ -214,6 +294,7 @@ class AgentOrchestrator:
         
         Args:
             stages: List of stage names to execute
+            inputs: Dictionary of inputs for each stage
             context: Agent execution context
             
         Returns:
@@ -224,7 +305,9 @@ class AgentOrchestrator:
         
         for stage in stages:
             if stage in self.agents:
-                tasks.append(self.agents[stage].execute({}, context))
+                # Use provided input for stage or empty dict if not provided
+                stage_input = inputs.get(stage, {})
+                tasks.append(self.agents[stage].execute(stage_input, context))
                 stage_names.append(stage)
         
         results = await asyncio.gather(*tasks, return_exceptions=True)

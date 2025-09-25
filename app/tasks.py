@@ -7,7 +7,7 @@ through the multi-agent pipeline.
 
 from celery import Task
 from celery.utils.log import get_task_logger
-from typing import Dict, Any
+from typing import Dict, Any, List
 import asyncio
 from datetime import datetime
 
@@ -161,6 +161,183 @@ def process_document_task(self, document_dict: Dict[str, Any], context_dict: Dic
         }
 
 
+async def trigger_single_webhook(webhook: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Trigger a single webhook asynchronously
+    
+    Args:
+        webhook: Webhook configuration (id, url, events, etc.)
+        payload: Webhook payload data
+        
+    Returns:
+        Webhook delivery result with status and details
+    """
+    import httpx
+    
+    webhook_id = webhook.get("id", "unknown")
+    
+    try:
+        # Check if webhook is subscribed to this event
+        events = webhook.get("events", ["document.processed"])
+        if payload.get("event") not in events:
+            return {
+                "webhook_id": webhook_id,
+                "status": "skipped",
+                "reason": "event_not_subscribed"
+            }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                webhook["url"],
+                json=payload,
+                timeout=settings.webhook_timeout,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if 200 <= response.status_code < 300:
+                logger.info(f"Webhook {webhook_id} triggered successfully (status: {response.status_code})")
+                return {
+                    "webhook_id": webhook_id,
+                    "status": "success",
+                    "status_code": response.status_code,
+                    "response_time_ms": response.elapsed.total_seconds() * 1000
+                }
+            else:
+                logger.error(f"Webhook {webhook_id} failed with status {response.status_code}")
+                return {
+                    "webhook_id": webhook_id,
+                    "status": "failed",
+                    "status_code": response.status_code,
+                    "response_time_ms": response.elapsed.total_seconds() * 1000
+                }
+                
+    except httpx.TimeoutException:
+        logger.error(f"Webhook {webhook_id} timed out after {settings.webhook_timeout}s")
+        return {
+            "webhook_id": webhook_id,
+            "status": "timeout",
+            "error": f"Request timed out after {settings.webhook_timeout}s"
+        }
+    except httpx.RequestError as e:
+        logger.error(f"Webhook {webhook_id} request failed: {str(e)}")
+        return {
+            "webhook_id": webhook_id,
+            "status": "error",
+            "error": f"Request error: {str(e)}"
+        }
+    except Exception as e:
+        logger.error(f"Webhook {webhook_id} failed with unexpected error: {str(e)}")
+        return {
+            "webhook_id": webhook_id,
+            "status": "error",
+            "error": str(e)
+        }
+
+
+async def trigger_webhooks_parallel(webhooks: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Trigger multiple webhooks in parallel using asyncio.gather
+    
+    Args:
+        webhooks: List of webhook configurations
+        payload: Webhook payload data
+        
+    Returns:
+        Aggregated results from all webhook deliveries
+    """
+    if not webhooks:
+        logger.info("No active webhooks found to trigger")
+        return {
+            "webhooks_triggered": 0,
+            "webhooks_failed": 0,
+            "webhooks_skipped": 0,
+            "details": [],
+            "total_time_ms": 0
+        }
+    
+    start_time = datetime.utcnow()
+    logger.info(f"Triggering {len(webhooks)} webhooks in parallel for document {payload.get('document_id')}")
+    
+    # Create tasks for parallel execution
+    webhook_tasks = [
+        trigger_single_webhook(webhook, payload)
+        for webhook in webhooks
+        if webhook.get("active", False)  # Only include active webhooks
+    ]
+    
+    if not webhook_tasks:
+        logger.info("No active webhooks to process")
+        return {
+            "webhooks_triggered": 0,
+            "webhooks_failed": 0,
+            "webhooks_skipped": 0,
+            "details": [],
+            "total_time_ms": 0
+        }
+    
+    # Execute all webhook calls in parallel
+    try:
+        webhook_results = await asyncio.gather(*webhook_tasks, return_exceptions=True)
+    except Exception as e:
+        logger.error(f"Critical error during parallel webhook execution: {str(e)}")
+        return {
+            "webhooks_triggered": 0,
+            "webhooks_failed": len(webhook_tasks),
+            "webhooks_skipped": 0,
+            "details": [{"error": f"Critical failure: {str(e)}"}],
+            "total_time_ms": 0
+        }
+    
+    # Aggregate results
+    results = {
+        "webhooks_triggered": 0,
+        "webhooks_failed": 0,
+        "webhooks_skipped": 0,
+        "details": [],
+        "total_time_ms": (datetime.utcnow() - start_time).total_seconds() * 1000
+    }
+    
+    for i, result in enumerate(webhook_results):
+        if isinstance(result, Exception):
+            # Handle exceptions from asyncio.gather
+            webhook_id = webhooks[i].get("id", f"webhook_{i}")
+            logger.error(f"Webhook {webhook_id} raised exception: {str(result)}")
+            results["webhooks_failed"] += 1
+            results["details"].append({
+                "webhook_id": webhook_id,
+                "status": "exception",
+                "error": str(result)
+            })
+        elif isinstance(result, dict):
+            # Process normal webhook result
+            status = result.get("status", "unknown")
+            if status == "success":
+                results["webhooks_triggered"] += 1
+            elif status == "skipped":
+                results["webhooks_skipped"] += 1
+            else:
+                results["webhooks_failed"] += 1
+            results["details"].append(result)
+        else:
+            # Handle unexpected result format
+            webhook_id = webhooks[i].get("id", f"webhook_{i}")
+            logger.error(f"Webhook {webhook_id} returned unexpected result format: {type(result)}")
+            results["webhooks_failed"] += 1
+            results["details"].append({
+                "webhook_id": webhook_id,
+                "status": "error",
+                "error": f"Unexpected result format: {type(result)}"
+            })
+    
+    logger.info(
+        f"Webhook execution completed in {results['total_time_ms']:.2f}ms: "
+        f"{results['webhooks_triggered']} triggered, {results['webhooks_failed']} failed, "
+        f"{results['webhooks_skipped']} skipped"
+    )
+    
+    return results
+
+
 @celery_app.task(
     name="app.tasks.trigger_webhooks",
     max_retries=3,
@@ -168,23 +345,18 @@ def process_document_task(self, document_dict: Dict[str, Any], context_dict: Dic
 )
 def trigger_webhooks_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Trigger registered webhooks with document processing results
+    Trigger registered webhooks with document processing results in parallel
+    
+    This optimized version executes all webhook calls concurrently using asyncio,
+    significantly improving performance when multiple webhooks are registered.
     
     Args:
         payload: Full webhook payload with event, timestamp, document_id, job_id, and schema
         
     Returns:
-        Webhook delivery results
+        Webhook delivery results with aggregated statistics and individual details
     """
-    import httpx
-    
-    logger.info(f"Triggering webhooks for document {payload.get('document_id')}")
-    
-    results = {
-        "webhooks_triggered": 0,
-        "webhooks_failed": 0,
-        "details": []
-    }
+    logger.info(f"Starting parallel webhook execution for document {payload.get('document_id')}")
     
     # Get webhooks from Redis shared state
     state_manager = get_state_manager(settings.redis_host, settings.redis_port, 0)
@@ -193,54 +365,37 @@ def trigger_webhooks_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         # Fetch active webhooks from Redis
         webhooks = state_manager.list_webhooks(active_only=True)
         
-        for webhook in webhooks:
-            if not webhook.get("active"):
-                continue
-                
-            # Check if webhook is subscribed to this event
-            events = webhook.get("events", ["document.processed"])
-            if payload.get("event") not in events:
-                continue
-                
-            try:
-                with httpx.Client() as client:
-                    response = client.post(
-                        webhook["url"],
-                        json=payload,  # Send full payload, not just schema
-                        timeout=settings.webhook_timeout_seconds,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    
-                    if 200 <= response.status_code < 300:
-                        results["webhooks_triggered"] += 1
-                        results["details"].append({
-                            "webhook_id": webhook["id"],
-                            "status": "success",
-                            "status_code": response.status_code
-                        })
-                        logger.info(f"Webhook {webhook['id']} triggered successfully")
-                    else:
-                        results["webhooks_failed"] += 1
-                        results["details"].append({
-                            "webhook_id": webhook["id"],
-                            "status": "failed",
-                            "status_code": response.status_code
-                        })
-                        logger.error(f"Webhook {webhook['id']} failed with status {response.status_code}")
-                        
-            except Exception as e:
-                results["webhooks_failed"] += 1
-                results["details"].append({
-                    "webhook_id": webhook["id"],
-                    "status": "error",
-                    "error": str(e)
-                })
-                logger.error(f"Failed to trigger webhook {webhook['id']}: {e}")
-                
-    except Exception as e:
-        logger.error(f"Failed to fetch webhooks: {e}")
+        if not webhooks:
+            logger.info("No active webhooks registered")
+            return {
+                "webhooks_triggered": 0,
+                "webhooks_failed": 0,
+                "webhooks_skipped": 0,
+                "details": [],
+                "total_time_ms": 0
+            }
         
-    return results
+        # Run parallel webhook execution in async context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            results = loop.run_until_complete(
+                trigger_webhooks_parallel(webhooks, payload)
+            )
+            return results
+        finally:
+            loop.close()
+            
+    except Exception as e:
+        logger.error(f"Failed to trigger webhooks: {str(e)}", exc_info=True)
+        return {
+            "webhooks_triggered": 0,
+            "webhooks_failed": 1,
+            "webhooks_skipped": 0,
+            "details": [{"error": f"Webhook system failure: {str(e)}"}],
+            "total_time_ms": 0
+        }
 
 
 @celery_app.task(name="app.tasks.health_check")

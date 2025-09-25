@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from .base_agent import BaseAgent, AgentContext
 from ..config import settings
+from ..utils.security import validate_file_access, PathTraversalError, log_security_event
 
 class ClassificationInput(BaseModel):
     """Input for document classification"""
@@ -60,17 +61,34 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         )
         
     async def validate_input(self, input_data: ClassificationInput) -> bool:
-        """Validate classification input"""
+        """Validate classification input with security checks"""
         if not input_data.file_path:
             return False
             
-        # Resolve full path using environment-aware method
-        full_path = Path(settings.get_upload_path()) / input_data.file_path
-        if not full_path.exists():
-            self.logger.error(f"File not found: {full_path}")
-            return False
+        try:
+            # Securely validate file path and existence
+            validate_file_access(
+                input_data.file_path, 
+                base_dir=settings.get_upload_path(),
+                must_exist=True
+            )
+            return True
             
-        return True
+        except (PathTraversalError, FileNotFoundError, ValueError, PermissionError) as e:
+            # Log security event for path traversal attempts
+            if isinstance(e, PathTraversalError):
+                log_security_event(
+                    "PATH_TRAVERSAL_ATTEMPT",
+                    {
+                        "agent": "classification_agent",
+                        "file_path": input_data.file_path,
+                        "error": str(e)
+                    },
+                    level="ERROR"
+                )
+            
+            self.logger.error(f"File validation failed: {e}")
+            return False
     
     async def process(
         self,
@@ -87,8 +105,41 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         Returns:
             Classification output with document type and confidence
         """
-        # Resolve full path using environment-aware method
-        file_path = Path(settings.get_upload_path()) / input_data.file_path
+        try:
+            # Securely resolve file path
+            file_path = validate_file_access(
+                input_data.file_path,
+                base_dir=settings.get_upload_path(),
+                must_exist=True
+            )
+        except (PathTraversalError, FileNotFoundError, ValueError, PermissionError) as e:
+            # Log security event for path traversal attempts
+            if isinstance(e, PathTraversalError):
+                log_security_event(
+                    "PATH_TRAVERSAL_ATTEMPT",
+                    {
+                        "agent": "classification_agent",
+                        "operation": "process",
+                        "file_path": input_data.file_path,
+                        "error": str(e)
+                    },
+                    level="ERROR"
+                )
+            
+            self.logger.error(f"Secure file path resolution failed: {e}")
+            # Return safe default classification for security failures
+            return ClassificationOutput(
+                document_type="document",
+                confidence=0.0,
+                mime_type="application/octet-stream",
+                file_extension=".unknown",
+                is_supported=False,
+                metadata={
+                    "error": "File validation failed",
+                    "file_name": input_data.file_name or "unknown",
+                    "file_size": input_data.file_size or 0
+                }
+            )
         
         # Detect MIME type if not provided
         if input_data.mime_type:
@@ -139,7 +190,7 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         Detect MIME type using multiple methods
         
         Args:
-            file_path: Path to file
+            file_path: Secure path to file
             
         Returns:
             Detected MIME type
@@ -183,7 +234,7 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         Classify document type based on available information
         
         Args:
-            file_path: Path to document
+            file_path: Secure path to document
             mime_type: MIME type of document
             file_extension: File extension
             

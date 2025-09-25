@@ -1,6 +1,6 @@
 # Document Ingestion Agent
 
-An intelligent multi-agent pipeline for processing multi-media documents (PDFs, images) through specialized AI agents, extracting structured data, and generating standardized JSON schemas for webhook and API automation triggers using the Mistral AI OCR API.
+An intelligent multi-agent pipeline for processing documents (PDFs, images) through 5 specialized AI agents, extracting structured data, and generating JSON schemas for webhook automation using Mistral AI OCR API.
 
 ## Table of Contents
 - [Features](#features)
@@ -16,19 +16,26 @@ An intelligent multi-agent pipeline for processing multi-media documents (PDFs, 
 
 ## Features
 
-- **Multi-Format Support**: Process PDFs, images (PNG, JPG, TIFF, BMP)
-- **5-Agent Architecture**: Specialized agents for classification, OCR, analysis, schema generation, and validation
-- **Mistral AI OCR Integration**: Exclusive OCR provider for accurate text extraction with rate limiting
-- **Async Processing**: Non-blocking document processing with Celery background tasks
-- **Webhook Automation**: Automatic webhook triggers upon completion with customizable events
-- **Redis State Management**: Multi-database Redis configuration for state, queuing, and rate limiting
-- **Docker Development**: Hybrid development modes with containerized dependencies
-- **Health Monitoring**: Real-time agent health checks and application metrics
-- **Schema Generation**: Standardized JSON output for automation triggers
-- **Rate Limiting**: Intelligent API protection and throttling with Redis backend
-- **Retry Logic**: Automatic retry with exponential backoff for fault tolerance
-- **API Authentication**: Secure API key-based authentication with header binding fix
-- **File Validation**: Content type checking, size limits, and deduplication
+### Core Capabilities
+- **Multi-Format Document Processing**: PDFs, images (PNG, JPG, JPEG, TIFF, BMP)
+- **5-Agent Pipeline Architecture**: Classification → OCR → Analysis → Schema Generation → Validation
+- **Mistral AI OCR Integration**: Exclusive OCR provider using Mistral AI SDK with intelligent rate limiting
+- **NDA Document Support**: Advanced field extraction for contracts, NDAs, and legal documents
+- **Async Processing**: Non-blocking API with Celery task queue and Redis message broker
+
+### Infrastructure & State Management  
+- **Redis Multi-Database Architecture**: Separate databases for state (DB0), broker (DB1), results (DB2), rate limiting (DB3)
+- **Webhook Automation**: JSON-based webhook registration with event filtering and automatic triggers
+- **Rate Limiting**: slowapi integration with Redis backend for API throttling
+- **Health Monitoring**: Comprehensive health checks with verbose infrastructure monitoring
+- **Docker Development Modes**: Hybrid, full Docker, and dependencies-only configurations
+
+### Security & Quality
+- **API Authentication**: X-API-Key header-based authentication with dependency injection
+- **File Validation**: MIME type checking, size limits, SHA-256 deduplication
+- **Retry Logic**: Exponential backoff for fault tolerance across all agents
+- **Schema Generation**: Standardized JSON output for automation integration
+- **Real-time Status Tracking**: Celery AsyncResult integration for pipeline monitoring
 
 ## Architecture Overview
 
@@ -43,21 +50,21 @@ graph TB
     end
     
     subgraph APILayer ["API Gateway Layer"]
-        FastAPI[FastAPI Server Port 8000]
+        FastAPI[FastAPI Server<br/>Port 8000]
         Auth[API Key Authentication]
         CORS[CORS Middleware]
-        RateLimit[Rate Limiting with Redis DB3]
+        RateLimit[slowapi Rate Limiting<br/>Redis DB3]
     end
     
     subgraph ProcessingLayer ["Processing Layer"]
         Orchestrator[Agent Orchestrator]
         CeleryWorkers[Celery Workers]
-        TaskQueue[Redis Message Broker]
+        TaskQueue[Redis Message Broker<br/>DB1]
         
         subgraph AgentPipeline ["5-Agent Pipeline"]
             CA[Classification Agent]
-            OA[Mistral OCR Agent]
-            AA[Content Analysis Agent]
+            OA[Mistral OCR Agent<br/>SDK Integration]
+            AA[Content Analysis Agent<br/>NDA Support]
             SA[Schema Generation Agent]
             VA[Validation Agent]
         end
@@ -65,16 +72,16 @@ graph TB
     
     subgraph DataLayer ["Data Layer"]
         Redis[(Redis Multi-DB)]
-        RedisDB0[DB0 State Management]
-        RedisDB1[DB1 Celery Broker]
-        RedisDB2[DB2 Task Results]
-        RedisDB3[DB3 Rate Limiting]
-        Storage[File Storage]
+        RedisDB0[DB0: Application State<br/>Document Metadata]
+        RedisDB1[DB1: Celery Broker<br/>Task Queue]
+        RedisDB2[DB2: Task Results<br/>Processing Outcomes]
+        RedisDB3[DB3: Rate Limiting<br/>API Throttling]
+        Storage[File Storage<br/>uploads/]
     end
     
     subgraph ExternalServices ["External Services"]
-        MistralAPI[Mistral AI OCR API]
-        WebhookURLs[External Webhook Endpoints]
+        MistralAPI[Mistral AI OCR API<br/>SDK Integration]
+        WebhookURLs[External Webhook URLs<br/>JSON Payloads]
     end
     
     Client --> FastAPI
@@ -98,7 +105,7 @@ graph TB
     Redis --> RedisDB2
     Redis --> RedisDB3
     Orchestrator --> Storage
-    Orchestrator --> WebhookURLs
+    VA --> WebhookURLs
     
     style FastAPI fill:#4CAF50
     style Orchestrator fill:#2196F3
@@ -141,18 +148,18 @@ stateDiagram-v2
 ### Redis State Management Architecture
 
 ```mermaid
-graph LR
-    subgraph RedisInstance ["Redis Server Port 6379"]
-        DB0[DB0 - Application State<br/>Document metadata<br/>Pipeline states]
-        DB1[DB1 - Celery Broker<br/>Task queue<br/>Message routing]
-        DB2[DB2 - Task Results<br/>Processing outcomes<br/>Agent responses]
-        DB3[DB3 - Rate Limiting<br/>API throttling<br/>Request counters]
+graph TB
+    subgraph RedisInstance ["Redis Server :6379"]
+        DB0[DB0: Application State<br/>• Document metadata<br/>• Webhook registrations<br/>• Job pipeline states]
+        DB1[DB1: Celery Broker<br/>• Task queue<br/>• Message routing<br/>• Job distribution]
+        DB2[DB2: Task Results<br/>• Processing outcomes<br/>• Agent responses<br/>• Generated schemas]
+        DB3[DB3: Rate Limiting<br/>• slowapi counters<br/>• Request throttling<br/>• IP blocking]
     end
     
-    subgraph Applications ["Application Layer"]
-        FastAPI[FastAPI Server]
-        CeleryWorker[Celery Workers]
-        StateManager[State Manager Service]
+    subgraph Applications ["Application Services"]
+        FastAPI[FastAPI Server<br/>• REST API endpoints<br/>• Authentication<br/>• File uploads]
+        CeleryWorker[Celery Workers<br/>• Pipeline execution<br/>• Agent orchestration<br/>• Webhook delivery]
+        StateManager[Redis State Manager<br/>• Cross-process state<br/>• Shared memory<br/>• TTL management]
     end
     
     FastAPI --> DB0
@@ -160,6 +167,8 @@ graph LR
     CeleryWorker --> DB1
     CeleryWorker --> DB2
     StateManager --> DB0
+    StateManager --> DB1
+    StateManager --> DB2
     
     style DB0 fill:#E3F2FD
     style DB1 fill:#FFF3E0
@@ -229,18 +238,36 @@ Required environment variables:
 # Required
 MISTRAL_API_KEY=your_mistral_api_key_here
 
-# Optional (with defaults)
+# API Configuration
 API_HOST=0.0.0.0
 API_PORT=8000
+API_PREFIX=/api/v1
+
+# Authentication (Optional - disabled by default)
+ENABLE_API_KEY_AUTH=false
+API_KEYS=dev-key-123,prod-key-456
+
+# Redis Multi-Database Configuration  
 REDIS_HOST=localhost
 REDIS_PORT=6379
+# DB0: Application state, DB1: Celery broker, DB2: Task results, DB3: Rate limiting
 
-# Database Configuration (Optional - Redis is used for state management by default)
-# DATABASE_URL=postgresql://user:password@localhost/dbname
+# Celery Task Queue
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_RESULT_BACKEND=redis://localhost:6379/2
 
-# Rate Limiting (Optional)
+# Rate Limiting (slowapi)
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_REDIS_DB=3
+RATE_LIMIT_DEFAULT_LIMITS=200 per minute,1000 per hour
+
+# Optional: PostgreSQL (Redis is primary state management)
+# DATABASE_URL=postgresql://user:password@localhost/dbname
+
+# File Processing
+MAX_UPLOAD_SIZE_MB=10
+ALLOWED_EXTENSIONS=.pdf,.png,.jpg,.jpeg,.tiff,.bmp
+UPLOAD_DIRECTORY=./uploads
 ```
 
 ### 3. Quick Start Options
@@ -466,9 +493,9 @@ curl -X GET "http://localhost:8000/api/v1/documents/doc-uuid-here/schema" \
 
 **Endpoint**: `POST /api/v1/webhooks/register`
 
-Register a webhook URL to receive automatic notifications when documents are processed.
+Register a webhook URL to receive automatic notifications when documents are processed. Uses Pydantic models for request validation.
 
-**Rate Limits**: 10 requests per minute per IP (when rate limiting enabled)
+**Rate Limits**: 10 requests per minute per IP (when rate limiting enabled via slowapi)
 
 **Request with JSON body (recommended)**:
 ```bash
@@ -482,21 +509,27 @@ curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
   }'
 ```
 
-**Request with query parameters (alternative)**:
+**NDA document processing webhook**:
 ```bash
-curl -X POST "http://localhost:8000/api/v1/webhooks/register?webhook_url=https://webhook.site/unique-url&webhook_name=Test%20Webhook&events=document.processed" \
-  -H "X-API-Key: dev-key-123"
+curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
+  -H "X-API-Key: prod-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "https://legal-system.company.com/nda-webhook",
+    "webhook_name": "NDA Processing Handler",
+    "events": ["document.processed", "document.failed"]
+  }'
 ```
 
-**Full example with multiple events**:
+**Multiple events subscription**:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
   -H "X-API-Key: your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "webhook_url": "https://your-app.com/webhooks/document-processed",
+    "webhook_url": "https://your-app.com/webhooks/documents",
     "webhook_name": "Production Document Handler",
-    "events": ["document.processed", "document.failed"]
+    "events": ["document.processed", "document.failed", "document.validated"]
   }'
 ```
 
@@ -510,34 +543,54 @@ curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
 
 **Error Responses**:
 ```json
+// Rate limit exceeded (429)
+{
+  "error": "Rate limit exceeded: 10 per 1 minute"
+}
+
 // Invalid API key (401)
 {
   "detail": "Invalid API key"
 }
 
-// Missing webhook_url (422)
+// Invalid URL format (422)
 {
   "detail": [
     {
-      "loc": ["query", "webhook_url"],
-      "msg": "field required",
-      "type": "value_error.missing"
+      "loc": ["body", "webhook_url"],
+      "msg": "invalid or missing URL scheme",
+      "type": "value_error.url.scheme"
     }
   ]
 }
 ```
 
-**Webhook Payload** (sent to your URL):
+**Enhanced Webhook Payload** (sent to your URL with Redis state data):
 ```json
 {
   "event": "document.processed",
   "timestamp": "2024-01-15T10:32:15Z",
   "document_id": "doc-uuid-here",
   "job_id": "job-uuid-here",
-  "schema": {
-    "document_type": "invoice",
-    "extracted_fields": { "..." },
-    "validation_results": { "..." }
+  "document_schema": {
+    "document_type": "nda",
+    "confidence_score": 0.94,
+    "extracted_fields": {
+      "parties": ["Company A", "Company B"],
+      "effective_date": "2024-01-15",
+      "confidentiality_period": "5 years",
+      "governing_law": "California"
+    },
+    "validation_results": {
+      "is_valid": true,
+      "errors": [],
+      "warnings": ["Missing signature date"]
+    }
+  },
+  "processing_metadata": {
+    "celery_task_id": "celery-task-uuid",
+    "processing_time_seconds": 12.4,
+    "redis_state_db": "DB0"
   }
 }
 ```
@@ -661,7 +714,7 @@ curl -X DELETE "http://localhost:8000/api/v1/webhooks/webhook-uuid-here" \
 
 **Endpoint**: `GET /health`
 
-System health check with agent status and application information. **No authentication required**.
+Comprehensive system health check with agent status and infrastructure monitoring. **No authentication required**.
 
 **Basic health check**:
 ```bash
@@ -669,22 +722,25 @@ curl -X GET "http://localhost:8000/health" \
   -H "Accept: application/json"
 ```
 
-**Verbose health check with detailed information**:
+**Verbose health check with Redis multi-database status**:
 ```bash
 curl -X GET "http://localhost:8000/health?verbose=true" \
   -H "Accept: application/json"
 ```
 
-**Check specific components**:
+**Infrastructure-specific checks**:
 ```bash
-# Check Redis connectivity
+# Check Redis multi-database connectivity
 curl -X GET "http://localhost:8000/health?verbose=true&check_redis=true"
 
-# Check Celery workers
+# Check Celery worker status and task queue
 curl -X GET "http://localhost:8000/health?verbose=true&check_celery=true"
+
+# Check rate limiter with slowapi
+curl -X GET "http://localhost:8000/health?verbose=true&check_rate_limit=true"
 ```
 
-**Response** (200 OK):
+**Enhanced Response** (200 OK):
 ```json
 {
   "status": "healthy",
@@ -694,54 +750,82 @@ curl -X GET "http://localhost:8000/health?verbose=true&check_celery=true"
   "agents": {
     "classification": {
       "status": "healthy",
-      "last_check": "2024-01-15T10:45:29Z"
+      "last_check": "2024-01-15T10:45:29Z",
+      "supported_types": ["pdf", "image", "nda"]
     },
-    "ocr": {
+    "mistral_ocr": {
       "status": "healthy",
       "last_check": "2024-01-15T10:45:29Z",
       "api_status": "connected",
-      "rate_limit_status": "ok"
+      "rate_limit_status": "ok",
+      "sdk_version": "1.5.0",
+      "last_request": "2024-01-15T10:44:15Z"
     },
-    "analysis": {
+    "content_analysis": {
       "status": "healthy",
-      "last_check": "2024-01-15T10:45:29Z"
+      "last_check": "2024-01-15T10:45:29Z",
+      "nda_support": "enabled",
+      "patterns_loaded": 45
     },
-    "schema": {
+    "schema_generation": {
       "status": "healthy",
-      "last_check": "2024-01-15T10:45:29Z"
+      "last_check": "2024-01-15T10:45:29Z",
+      "schemas_generated": 156
     },
     "validation": {
       "status": "healthy",
-      "last_check": "2024-01-15T10:45:29Z"
+      "last_check": "2024-01-15T10:45:29Z",
+      "validation_rules": 23
     }
   },
   "infrastructure": {
     "redis": {
       "status": "healthy",
-      "databases": {
-        "db0": "connected",
-        "db1": "connected", 
-        "db2": "connected",
-        "db3": "connected"
+      "multi_database": {
+        "db0_application_state": "connected",
+        "db1_celery_broker": "connected", 
+        "db2_task_results": "connected",
+        "db3_rate_limiting": "connected"
       },
-      "memory_usage": "2.1MB"
+      "memory_usage": "4.7MB",
+      "connections": 8,
+      "state_manager": "active"
     },
     "celery": {
       "status": "healthy",
       "active_workers": 2,
       "queued_tasks": 0,
-      "failed_tasks": 0
+      "completed_tasks": 142,
+      "failed_tasks": 3,
+      "retry_tasks": 1,
+      "broker_transport": "redis://redis:6379/1",
+      "result_backend": "redis://redis:6379/2"
     },
     "rate_limiter": {
       "status": "enabled",
-      "requests_per_minute": 45,
-      "blocked_requests": 0
+      "backend": "slowapi + Redis DB3",
+      "current_limits": "200/minute, 1000/hour",
+      "requests_last_minute": 45,
+      "blocked_requests": 0,
+      "active_ips": 3
+    },
+    "file_system": {
+      "upload_directory": "./uploads",
+      "available_space_mb": 2048,
+      "permissions": "writable"
     }
+  },
+  "statistics": {
+    "uptime_seconds": 86400,
+    "total_requests": 1247,
+    "active_documents": 6,
+    "webhook_deliveries": 139,
+    "average_processing_time_ms": 8450
   }
 }
 ```
 
-**Error Response** (503 Service Unavailable):
+**Unhealthy Response** (503 Service Unavailable):
 ```json
 {
   "status": "unhealthy",
@@ -749,10 +833,23 @@ curl -X GET "http://localhost:8000/health?verbose=true&check_celery=true"
   "version": "1.0.0",
   "environment": "development",
   "agents": {
-    "ocr": {
+    "mistral_ocr": {
       "status": "unhealthy",
       "last_check": "2024-01-15T10:45:29Z",
-      "error": "Mistral API connection failed"
+      "error": "Mistral AI SDK connection timeout",
+      "last_successful_request": "2024-01-15T09:30:12Z"
+    }
+  },
+  "infrastructure": {
+    "redis": {
+      "status": "partial",
+      "multi_database": {
+        "db0_application_state": "connected",
+        "db1_celery_broker": "disconnected",
+        "db2_task_results": "connected",
+        "db3_rate_limiting": "connected"
+      },
+      "error": "Celery broker (DB1) connection lost"
     }
   }
 }
@@ -1125,38 +1222,44 @@ class BaseAgent:
 
 **File**: `app/agents/mistral_ocr_agent.py`
 
-**Purpose**: Text extraction via Mistral AI OCR API (exclusive OCR provider)
+**Purpose**: Text extraction via Mistral AI OCR API using official Mistral AI SDK (exclusive OCR provider)
 
 **Responsibilities**:
-- PDF and image text extraction
-- Rate limiting with configurable delays
-- Retry logic with exponential backoff
-- OCR confidence scoring
-- API error handling
+- PDF and image text extraction with mistral-ocr-latest model
+- Advanced NDA and legal document processing
+- Rate limiting with intelligent backoff algorithms
+- Multi-page document handling with per-page analysis
+- OCR confidence scoring and metadata extraction
+- SDK-based API integration for improved reliability
 
 **Key Features**:
-- Uses httpx for async HTTP requests
-- Intelligent rate limiting
-- Supports multiple document formats
-- Returns structured text with confidence metrics
+- **Mistral AI SDK Integration**: Uses official `mistralai>=1.5.0` SDK instead of direct HTTP
+- **Advanced Document Analysis**: Supports tables, images, and complex layouts
+- **Per-Page Processing**: Individual page analysis with confidence scores
+- **Enhanced Error Handling**: SDK-level retry logic and connection management
+- **Structured Output**: Returns OCRPage objects with detailed metadata
+- **Performance Optimized**: Async processing with configurable concurrency
 
 ### 3. ContentAnalysisAgent
 
 **File**: `app/agents/content_analysis_agent.py`
 
-**Purpose**: Pattern-based field extraction and content parsing
+**Purpose**: Advanced pattern-based field extraction with specialized NDA and legal document support
 
 **Responsibilities**:
-- Extract structured fields from raw text
-- Pattern recognition for different document types
-- Field validation and normalization
-- Data cleaning and preprocessing
+- Extract structured fields from raw OCR text using intelligent pattern matching
+- Advanced legal document parsing (NDAs, contracts, agreements)
+- Field validation and normalization with business rule enforcement  
+- Data cleaning, preprocessing, and entity relationship mapping
+- Multi-language support for international documents
 
-**Patterns Supported**:
-- Invoice: number, date, amounts, vendor info
-- Receipt: merchant, items, totals
-- Contract: parties, dates, terms
-- Custom: user-defined patterns
+**Enhanced Patterns Supported**:
+- **NDA Documents**: Parties, effective dates, confidentiality periods, governing law, termination clauses
+- **Invoices**: Numbers, dates, amounts, vendor information, line items, tax details
+- **Contracts**: Contracting parties, terms, conditions, signatures, renewal clauses
+- **Legal Documents**: Jurisdiction, governing law, dispute resolution, liability terms
+- **Receipts**: Merchants, items, totals, payment methods, timestamps
+- **Custom Patterns**: User-defined extraction rules and field mappings
 
 ### 4. SchemaGenerationAgent
 
@@ -2079,53 +2182,54 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
   -F "file=@sample.pdf"
 ```
 
-### Recent Changes (September 2025)
+## Latest Changes & Features (September 2025)
 
-#### Latest Implementation Updates
+### Key Implementation Updates
 
-**1. Redis State Management System**
-- **New File**: `app/services/state_manager.py` - Comprehensive Redis-based state management
-- **Multi-Database Architecture**: Separate Redis databases for different purposes:
-  - DB0: Application state and document metadata
-  - DB1: Celery message broker and task queue
-  - DB2: Task results and processing outcomes
-  - DB3: Rate limiting counters and API throttling
-- **Shared State**: Cross-process communication between FastAPI and Celery workers
-- **TTL Management**: Automatic expiration of documents (24h) and job states (1h)
+#### 1. Mistral AI SDK Integration
+- **Enhanced OCR Agent**: Updated to use official Mistral AI SDK (`mistralai>=1.5.0`) instead of direct HTTP calls
+- **Improved Reliability**: SDK-level connection management, retries, and error handling
+- **Advanced Features**: Multi-page analysis, table detection, and confidence scoring per page
+- **Model Integration**: Uses `mistral-ocr-latest` model for optimal text extraction accuracy
 
-**2. Webhook JSON Body Support**
-- **New File**: `app/models/webhook_models.py` - Pydantic models for webhook handling
-- **Enhanced Registration**: Support for both JSON body and query parameter formats
-- **Model Validation**: Structured webhook registration, updates, and responses
-- **Event Subscriptions**: Flexible event filtering for webhook deliveries
+#### 2. Redis Multi-Database State Management
+- **New Architecture**: `app/services/state_manager.py` provides comprehensive Redis-based state management
+- **Database Separation**: 
+  - **DB0**: Application state, document metadata, webhook registrations
+  - **DB1**: Celery message broker and task distribution
+  - **DB2**: Task results, processing outcomes, generated schemas
+  - **DB3**: Rate limiting counters and API throttling (slowapi integration)
+- **Cross-Process State Sharing**: Shared state between FastAPI server and Celery workers
+- **TTL Management**: Automatic expiration policies (24h documents, 1h job states)
 
-**3. Rate Limiting with slowapi**
-- **Integration**: Added slowapi for Redis-backed rate limiting
-- **Configuration**: 200 requests/minute, 1000/hour default limits
-- **Redis Backend**: Uses Redis DB3 for distributed rate limiting
-- **Per-IP Throttling**: Automatic IP-based request throttling and blocking
+#### 3. Enhanced NDA Document Processing
+- **Specialized Patterns**: Advanced field extraction for NDAs, contracts, and legal documents
+- **Entity Recognition**: Automatic identification of parties, dates, terms, governing law
+- **Legal Document Schema**: Structured output for legal document automation workflows
+- **Compliance Support**: Validation rules for legal document requirements
 
-**4. Celery Status Integration**
-- **AsyncResult Tracking**: Real-time Celery task status in API responses
-- **Enhanced Status Endpoint**: Now includes Celery task states (PENDING, PROGRESS, SUCCESS, FAILURE)
-- **Progress Tracking**: Detailed pipeline stage progression with timestamps
-- **Error Handling**: Improved error reporting with task failure details
+#### 4. Advanced Webhook System
+- **Pydantic Models**: `app/models/webhook_models.py` for structured webhook handling
+- **JSON Body Support**: Enhanced registration with `WebhookRegistration` and `WebhookUpdate` models
+- **Event Filtering**: Flexible event subscriptions (`document.processed`, `document.failed`, etc.)
+- **Redis Storage**: Webhook configurations stored in Redis DB0 for persistence
 
-**5. API Authentication Fix**
-- **Header Binding**: Fixed X-API-Key header dependency injection
-- **Consistent Auth**: Proper authentication across all protected endpoints
-- **Error Responses**: Clear 401 Unauthorized responses for invalid keys
+#### 5. Rate Limiting & API Security
+- **slowapi Integration**: Redis-backed rate limiting with configurable limits (200/min, 1000/hour)
+- **Per-IP Throttling**: Automatic request throttling and IP-based blocking
+- **Header Authentication**: Fixed X-API-Key dependency injection across all endpoints
+- **Security Enhancements**: Consistent 401 responses and proper error handling
 
-**6. Verbose Health Check**
-- **Detailed Monitoring**: Added verbose parameter for comprehensive health information
-- **Infrastructure Status**: Redis multi-database connectivity checks
-- **Celery Health**: Worker status, queue length, and failure counts
-- **Rate Limiter Status**: Current request rates and blocked request counters
+#### 6. Enhanced Monitoring & Health Checks
+- **Verbose Health Endpoint**: Comprehensive infrastructure monitoring with `?verbose=true`
+- **Multi-Database Monitoring**: Individual Redis database connectivity checks
+- **Celery Integration**: Real-time worker status, queue length, task completion rates
+- **Performance Metrics**: Processing times, success rates, and system statistics
 
-**7. Configuration Enhancements**
-- **DATABASE_URL Optional**: Redis now primary state management, PostgreSQL optional
-- **Environment Variables**: New Redis-specific configuration options
-- **Rate Limiting Config**: Configurable rate limits and Redis database selection
+#### 7. Real-time Status Tracking
+- **Celery AsyncResult**: Live pipeline status tracking using Celery's built-in result backend
+- **Enhanced Status API**: Detailed progress with pipeline stages, timestamps, and error details
+- **State Persistence**: Pipeline states maintained across server restarts via Redis
 
 #### Mermaid Diagram Fixes & Documentation Enhancements
 1. **Fixed Mermaid Syntax Issues**: Resolved "Could not find a suitable point for the given distance" errors
@@ -2235,47 +2339,106 @@ curl -X POST "http://localhost:8000/api/v1/documents/upload" \
 
 ---
 
-**Project Status**: Production Ready ✅  
-**Last Updated**: September 2025 (Latest Implementation Updates)  
+## Project Status & Quick Reference
+
+**Status**: Production Ready ✅  
 **Version**: 1.0.0  
+**Last Updated**: September 2025  
 **License**: MIT  
 
-**Latest Architecture Features**:
-- ✅ Redis Multi-Database State Management (DB0-DB3)
-- ✅ Rate Limiting with slowapi and Redis Backend
-- ✅ Webhook JSON Body Support with Pydantic Models
-- ✅ Celery AsyncResult Status Tracking Integration
-- ✅ Verbose Health Check with Infrastructure Monitoring
-- ✅ Fixed Mermaid Diagrams and Enhanced Documentation
+### Architecture Highlights
 
-**Quick Start Commands**:
+✅ **Multi-Agent Pipeline**: 5 specialized agents for document processing  
+✅ **Mistral AI SDK Integration**: Official SDK with advanced OCR capabilities  
+✅ **NDA Document Support**: Legal document processing with specialized patterns  
+✅ **Redis Multi-Database**: Separated state management (DB0-DB3)  
+✅ **Rate Limiting**: slowapi + Redis for API throttling  
+✅ **Webhook Automation**: JSON-based registration with event filtering  
+✅ **Real-time Monitoring**: Comprehensive health checks and status tracking  
+✅ **Celery Task Queue**: Async processing with Redis message broker  
+
+### Quick Start Commands
+
+**Development Setup**:
 ```bash
-# Start development environment with Redis multi-database
+# Clone and configure
+git clone https://github.com/yourusername/document-ingestion-agent.git
+cd document-ingestion-agent
+cp .env.example .env
+# Add MISTRAL_API_KEY=your_key_here
+
+# Start infrastructure (Redis + Celery)
 docker-compose -f docker-compose.dev.yml up -d
 
-# Run server with rate limiting and state management
+# Run FastAPI server locally
 ./run_server.sh
-
-# Test the complete pipeline with new features
-python test_pipeline.py
-
-# Check comprehensive API documentation
-open http://localhost:8000/api/v1/docs
-
-# Monitor health with verbose infrastructure status
-curl "http://localhost:8000/health?verbose=true"
-
-# Test rate limiting and webhook registration
-curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
-  -H "Content-Type: application/json" \
-  -d '{"webhook_url": "https://webhook.site/test", "webhook_name": "Test"}'
 ```
 
-**File Structure Summary**:
-- `app/services/state_manager.py` - Redis state management service
-- `app/models/webhook_models.py` - Webhook Pydantic models  
-- `app/main.py` - Updated with rate limiting and AsyncResult integration
-- `app/config.py` - Enhanced configuration with Redis multi-database support
-- `requirements.txt` - Added slowapi for rate limiting
+**API Testing**:
+```bash
+# Test document upload
+curl -X POST "http://localhost:8000/api/v1/documents/upload" \
+  -H "X-API-Key: dev-key-123" \
+  -F "file=@sample_nda.pdf"
 
-For issues, feature requests, or contributions, please refer to the project repository.
+# Register webhook for automation
+curl -X POST "http://localhost:8000/api/v1/webhooks/register" \
+  -H "X-API-Key: dev-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url": "https://webhook.site/your-url", "webhook_name": "Test Webhook"}'
+
+# Monitor system health
+curl "http://localhost:8000/health?verbose=true"
+```
+
+**Documentation Access**:
+- **Swagger UI**: http://localhost:8000/api/v1/docs
+- **ReDoc**: http://localhost:8000/api/v1/redoc
+- **Health Status**: http://localhost:8000/health
+
+### Core File Structure
+
+```
+app/
+├── agents/                          # 5-Agent Pipeline
+│   ├── classification_agent.py     # Document type identification
+│   ├── mistral_ocr_agent.py        # Mistral AI SDK integration
+│   ├── content_analysis_agent.py   # NDA & field extraction
+│   ├── schema_generation_agent.py  # JSON schema creation
+│   └── validation_agent.py         # Business rule validation
+├── services/
+│   └── state_manager.py            # Redis multi-database manager
+├── models/
+│   └── webhook_models.py           # Pydantic webhook models
+├── main.py                         # FastAPI app with all 9 endpoints
+├── celery_app.py                   # Celery configuration
+├── tasks.py                        # Background task definitions
+└── config.py                       # Pydantic settings
+```
+
+### Technology Stack
+
+- **Framework**: FastAPI + Celery + Redis
+- **AI/ML**: Mistral AI SDK (`mistralai>=1.5.0`)
+- **State Management**: Redis multi-database (DB0-DB3)
+- **Rate Limiting**: slowapi + Redis backend
+- **Authentication**: X-API-Key header-based
+- **Containerization**: Docker + Docker Compose
+- **Testing**: pytest with async support
+
+### Support & Contributions
+
+For issues, feature requests, or contributions:
+- Create GitHub issues for bugs and feature requests
+- Submit pull requests for code contributions  
+- Review the CLAUDE.md file for development guidance
+- Check the troubleshooting section for common issues
+
+**Monitoring Checklist**:
+- [ ] Redis multi-database connectivity (DB0-DB3)
+- [ ] Celery workers active and processing tasks
+- [ ] Mistral AI API accessible and within rate limits
+- [ ] Webhook endpoints responding to deliveries
+- [ ] File upload directory writable and accessible
+- [ ] Rate limiting functioning with slowapi + Redis
+- [ ] Agent processing times within acceptable thresholds

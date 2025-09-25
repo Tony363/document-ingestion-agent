@@ -53,6 +53,14 @@ celery_app.conf.update(
 # Auto-discover tasks from the tasks module
 celery_app.autodiscover_tasks()
 
+# Import worker signals to register them
+# This must be done after celery_app is created but before workers start
+try:
+    from . import worker_signals
+except ImportError:
+    # Signals are optional - if not present, continue without them
+    pass
+
 # For debugging - print configuration
 if settings.debug:
     print(f"Celery configured with broker: redis://{redis_host}:{redis_port}/1")

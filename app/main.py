@@ -119,9 +119,8 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on application shutdown"""
     logger.info("Shutting down application")
-    # Close OCR agent HTTP client
-    if "ocr" in orchestrator.agents:
-        await orchestrator.agents["ocr"].__aexit__(None, None, None)
+    # Note: Mistral client uses standard HTTP connections that are cleaned up automatically
+    # No explicit cleanup needed for the OCR agent
 
 # Dependency for API key authentication
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -559,6 +558,146 @@ async def get_metrics(authorized: bool = Depends(verify_api_key)):
 
 # Note: Webhook triggering is now handled by the Celery task trigger_webhooks_task
 # in app/tasks.py for better scalability and error handling
+
+@app.get(f"{settings.api_prefix}/admin/stuck-tasks")
+async def get_stuck_tasks(
+    authorized: bool = Depends(verify_api_key),
+    include_recovered: bool = False
+):
+    """Admin endpoint to list stuck/pending tasks"""
+    import redis
+    import json
+    from datetime import datetime, timedelta
+    
+    stuck_tasks = []
+    
+    try:
+        # Connect to Redis
+        r = redis.Redis(host=settings.redis_host, port=settings.redis_port, db=0, decode_responses=True)
+        
+        # Get all document keys
+        doc_keys = r.keys("doc:*")
+        
+        for doc_key in doc_keys:
+            try:
+                metadata_str = r.get(doc_key)
+                if not metadata_str:
+                    continue
+                    
+                metadata = json.loads(metadata_str)
+                celery_task_id = metadata.get('celery_task_id')
+                
+                if not celery_task_id:
+                    continue
+                
+                # Check task status
+                async_result = AsyncResult(celery_task_id, app=celery_app)
+                
+                # Include PENDING tasks or recovered tasks if requested
+                if async_result.status == 'PENDING' or (include_recovered and metadata.get('auto_recovered')):
+                    uploaded_at_str = metadata.get('uploaded_at', '')
+                    time_stuck = None
+                    
+                    if uploaded_at_str:
+                        uploaded_at = datetime.fromisoformat(uploaded_at_str.replace('Z', '+00:00'))
+                        time_since_upload = datetime.utcnow() - uploaded_at.replace(tzinfo=None)
+                        time_stuck = str(time_since_upload)
+                    
+                    stuck_tasks.append({
+                        'document_id': metadata.get('document_id'),
+                        'file_name': metadata.get('file_name'),
+                        'uploaded_at': uploaded_at_str,
+                        'time_stuck': time_stuck,
+                        'status': metadata.get('status'),
+                        'celery_task_id': celery_task_id,
+                        'celery_status': async_result.status,
+                        'auto_recovered': metadata.get('auto_recovered', False),
+                        'recovery_time': metadata.get('recovery_time')
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error checking document {doc_key}: {e}")
+                continue
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching stuck tasks: {str(e)}")
+    
+    return {
+        'total_stuck': len(stuck_tasks),
+        'tasks': stuck_tasks
+    }
+
+@app.post(f"{settings.api_prefix}/admin/retry-task/{{document_id}}")
+async def retry_stuck_task(
+    document_id: str,
+    authorized: bool = Depends(verify_api_key)
+):
+    """Admin endpoint to manually retry a stuck task"""
+    import redis
+    import json
+    from app.tasks import process_document_task
+    
+    try:
+        # Connect to Redis
+        r = redis.Redis(host=settings.redis_host, port=settings.redis_port, db=0, decode_responses=True)
+        
+        # Get document metadata
+        doc_key = f'doc:{document_id}'
+        metadata_str = r.get(doc_key)
+        
+        if not metadata_str:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        metadata = json.loads(metadata_str)
+        old_task_id = metadata.get('celery_task_id')
+        
+        # Revoke old task if exists
+        if old_task_id:
+            old_result = AsyncResult(old_task_id, app=celery_app)
+            if old_result.status == 'PENDING':
+                old_result.revoke(terminate=True)
+        
+        # Prepare document data
+        document_data = {
+            "file_path": f"{document_id}.pdf",
+            "mime_type": metadata.get("mime_type", "application/pdf"),
+            "file_size": metadata.get("file_size", 0),
+            "content_hash": metadata.get("content_hash", "")
+        }
+        
+        # Prepare context
+        context_data = {
+            "job_id": metadata.get("job_id"),
+            "document_id": document_id,
+            "metadata": {
+                "file_name": metadata.get("file_name"),
+                "upload_time": metadata.get("uploaded_at")
+            }
+        }
+        
+        # Queue new task
+        new_task = process_document_task.delay(document_data, context_data)
+        
+        # Update metadata
+        metadata['celery_task_id'] = new_task.id
+        metadata['status'] = 'processing'
+        metadata['manual_retry'] = True
+        metadata['retry_time'] = datetime.utcnow().isoformat()
+        
+        # Save updated metadata
+        r.set(doc_key, json.dumps(metadata))
+        
+        return {
+            'message': 'Task retried successfully',
+            'document_id': document_id,
+            'new_task_id': new_task.id,
+            'old_task_id': old_task_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrying task: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

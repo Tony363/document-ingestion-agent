@@ -17,6 +17,7 @@ import io
 import logging
 
 from .base_agent import BaseAgent, AgentContext
+from ..config import settings
 
 class OCRInput(BaseModel):
     """Input for OCR processing"""
@@ -78,9 +79,10 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
         if not input_data.file_path:
             return False
             
-        path = Path(input_data.file_path)
+        # Resolve full path using environment-aware method
+        path = Path(settings.get_upload_path()) / input_data.file_path
         if not path.exists():
-            self.logger.error(f"File not found: {input_data.file_path}")
+            self.logger.error(f"File not found: {path}")
             return False
             
         # Check file size
@@ -109,7 +111,8 @@ class MistralOCRAgent(BaseAgent[OCRInput, OCROutput]):
         import time
         start_time = time.time()
         
-        file_path = Path(input_data.file_path)
+        # Resolve full path using environment-aware method
+        file_path = Path(settings.get_upload_path()) / input_data.file_path
         
         # Check if PDF has extractable text first
         if input_data.mime_type == "application/pdf":

@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .base_agent import BaseAgent, AgentContext
+from ..config import settings
 
 class ClassificationInput(BaseModel):
     """Input for document classification"""
@@ -62,9 +63,10 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         if not input_data.file_path:
             return False
             
-        path = Path(input_data.file_path)
-        if not path.exists():
-            self.logger.error(f"File not found: {input_data.file_path}")
+        # Resolve full path using environment-aware method
+        full_path = Path(settings.get_upload_path()) / input_data.file_path
+        if not full_path.exists():
+            self.logger.error(f"File not found: {full_path}")
             return False
             
         return True
@@ -84,7 +86,8 @@ class ClassificationAgent(BaseAgent[ClassificationInput, ClassificationOutput]):
         Returns:
             Classification output with document type and confidence
         """
-        file_path = Path(input_data.file_path)
+        # Resolve full path using environment-aware method
+        file_path = Path(settings.get_upload_path()) / input_data.file_path
         
         # Detect MIME type if not provided
         if input_data.mime_type:

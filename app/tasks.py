@@ -112,7 +112,7 @@ def process_document_task(self, document_dict: Dict[str, Any], context_dict: Dic
             for agent_name, agent_result in pipeline_state.agent_results.items():
                 if agent_result and agent_result.data:
                     result["agent_results"][agent_name] = {
-                        "success": agent_result.success,
+                        "status": agent_result.status,
                         "data": agent_result.data.dict() if hasattr(agent_result.data, 'dict') else agent_result.data
                     }
             

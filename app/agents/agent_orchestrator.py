@@ -13,6 +13,11 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from .base_agent import BaseAgent, AgentContext, AgentResult, AgentStatus
+from .classification_agent import ClassificationInput
+from .mistral_ocr_agent import OCRInput
+from .content_analysis_agent import AnalysisInput
+from .schema_generation_agent import SchemaInput
+from .validation_agent import ValidationInput
 
 class PipelineStage(str, Enum):
     """Pipeline execution stages"""
@@ -111,11 +116,11 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "ocr" in self.agents:
-                ocr_input = {
-                    "file_path": document.file_path,
-                    "mime_type": document.mime_type,
-                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
-                }
+                ocr_input = OCRInput(
+                    file_path=document.file_path,
+                    mime_type=document.mime_type,
+                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                )
                 
                 ocr_result = await self.agents["ocr"].execute(
                     ocr_input, context
@@ -130,10 +135,10 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "analysis" in self.agents:
-                analysis_input = {
-                    "extracted_text": state.agent_results.get("ocr", {}).get("data", {}).get("text", ""),
-                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
-                }
+                analysis_input = AnalysisInput(
+                    extracted_text=state.agent_results["ocr"].data.full_text if state.agent_results.get("ocr") and state.agent_results["ocr"].data else "",
+                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                )
                 
                 analysis_result = await self.agents["analysis"].execute(
                     analysis_input, context
@@ -148,10 +153,10 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "schema" in self.agents:
-                schema_input = {
-                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown"),
-                    "extracted_data": state.agent_results.get("analysis", {}).get("data", {})
-                }
+                schema_input = SchemaInput(
+                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown",
+                    extracted_data=state.agent_results["analysis"].data.dict() if state.agent_results.get("analysis") and state.agent_results["analysis"].data else {}
+                )
                 
                 schema_result = await self.agents["schema"].execute(
                     schema_input, context
@@ -166,10 +171,10 @@ class AgentOrchestrator:
             state.updated_at = datetime.utcnow()
             
             if "validation" in self.agents:
-                validation_input = {
-                    "schema": state.agent_results.get("schema", {}).get("data", {}),
-                    "document_type": state.agent_results.get("classification", {}).get("data", {}).get("document_type", "unknown")
-                }
+                validation_input = ValidationInput(
+                    schema=state.agent_results["schema"].data.dict() if state.agent_results.get("schema") and state.agent_results["schema"].data else {},
+                    document_type=state.agent_results["classification"].data.document_type if state.agent_results.get("classification") and state.agent_results["classification"].data else "unknown"
+                )
                 
                 validation_result = await self.agents["validation"].execute(
                     validation_input, context

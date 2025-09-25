@@ -95,7 +95,7 @@ async def startup_event():
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     
     # Create upload directory if it doesn't exist
-    Path(settings.upload_directory).mkdir(parents=True, exist_ok=True)
+    Path(settings.get_upload_path()).mkdir(parents=True, exist_ok=True)
     
     # Initialize and register agents
     classification_agent = ClassificationAgent()
@@ -174,7 +174,7 @@ async def upload_document(
     content_hash = hashlib.sha256(content).hexdigest()
     
     # Save file to disk
-    file_path = Path(settings.upload_directory) / f"{document_id}{file_extension}"
+    file_path = Path(settings.get_upload_path()) / f"{document_id}{file_extension}"
     with open(file_path, "wb") as f:
         f.write(content)
     
@@ -207,9 +207,10 @@ async def upload_document(
         }
     )
     
-    # Create document data
+    # Create document data with just filename for cross-environment compatibility
+    filename = f"{document_id}{file_extension}"
     document = DocumentData(
-        file_path=str(file_path),
+        file_path=filename,  # Just filename, agents will resolve full path
         mime_type=file.content_type or "application/octet-stream",
         file_size=file_size,
         content_hash=content_hash
@@ -519,7 +520,7 @@ async def health_check(verbose: bool = Query(False, description="Return detailed
             "redis_host": settings.redis_host,
             "redis_port": settings.redis_port,
             "api_prefix": settings.api_prefix,
-            "upload_directory": settings.upload_directory,
+            "upload_directory": settings.get_upload_path(),
             "max_upload_size_mb": settings.max_upload_size_mb,
             "enable_api_key_auth": settings.enable_api_key_auth,
             "celery_broker": f"redis://{settings.redis_host}:{settings.redis_port}/1",

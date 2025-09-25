@@ -156,8 +156,21 @@ class Settings(BaseSettings):
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
     
     def get_upload_path(self) -> str:
-        """Get full upload directory path"""
-        return os.path.abspath(self.upload_directory)
+        """Get full upload directory path with environment awareness"""
+        # Detect if running in Docker (check for common Docker indicators)
+        is_docker = (
+            os.path.exists('/.dockerenv') or 
+            os.environ.get('DOCKER_CONTAINER') == 'true' or
+            os.environ.get('container') == 'docker'
+        )
+        
+        if is_docker:
+            # In Docker, use the mounted path
+            return "/app/uploads"
+        else:
+            # Local development, use relative path that gets mounted to Docker
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return os.path.join(base_dir, "uploads")
     
     def validate_mistral_config(self) -> bool:
         """Validate Mistral API configuration"""
